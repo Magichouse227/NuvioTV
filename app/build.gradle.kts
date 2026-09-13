@@ -363,7 +363,9 @@ androidComponents {
         val isFullDebug = variant.buildType == "debug" &&
             variant.productFlavors.any { it.second == "full" }
         if (isFullDebug) {
-            variant.buildConfigFields.put(
+            requireNotNull(variant.buildConfigFields) {
+                "BuildConfig must be enabled for the fullDebug test updater"
+            }.put(
                 "IS_FORK_TEST_BUILD",
                 com.android.build.api.variant.BuildConfigField(
                     "boolean",
