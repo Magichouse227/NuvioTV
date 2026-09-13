@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: pr-full-debug-build-${{ github.event.pull_request.number || github.ref }}
@@ -47,27 +47,37 @@ jobs:
           fi
 
       - name: Prepare CI signing config
+        env:
+          TEST_KEYSTORE_BASE64: ${{ secrets.NUVIO_TEST_KEYSTORE_BASE64 }}
+          TEST_KEY_ALIAS: ${{ secrets.NUVIO_TEST_KEY_ALIAS }}
+          TEST_KEY_PASSWORD: ${{ secrets.NUVIO_TEST_KEY_PASSWORD }}
+          TEST_STORE_PASSWORD: ${{ secrets.NUVIO_TEST_STORE_PASSWORD }}
         run: |
-          keytool -genkeypair \
-            -v \
-            -keystore "$RUNNER_TEMP/ci-debug.jks" \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US" \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000
+          for value in TEST_KEYSTORE_BASE64 TEST_KEY_ALIAS TEST_KEY_PASSWORD TEST_STORE_PASSWORD; do
+            if [ -z "${!value}" ]; then
+              echo "Missing required test signing secret: ${value}" >&2
+              exit 1
+            fi
+          done
+
+          printf '%s' "$TEST_KEYSTORE_BASE64" |
+            base64 --decode > "$RUNNER_TEMP/nuvio-test.jks"
 
           {
-            echo "NUVIO_RELEASE_STORE_FILE=$RUNNER_TEMP/ci-debug.jks"
-            echo "NUVIO_RELEASE_KEY_ALIAS=androiddebugkey"
-            echo "NUVIO_RELEASE_KEY_PASSWORD=android"
-            echo "NUVIO_RELEASE_STORE_PASSWORD=android"
+            echo "NUVIO_RELEASE_STORE_FILE=$RUNNER_TEMP/nuvio-test.jks"
+            echo "NUVIO_RELEASE_KEY_ALIAS=$TEST_KEY_ALIAS"
+            echo "NUVIO_RELEASE_KEY_PASSWORD=$TEST_KEY_PASSWORD"
+            echo "NUVIO_RELEASE_STORE_PASSWORD=$TEST_STORE_PASSWORD"
           } >> "$GITHUB_ENV"
 
       - name: Test updater and build fullDebug APK
-        run: ./gradlew :app:testFullDebugUnitTest --tests 'com.nuvio.tv.updater.*' :app:assembleFullDebug --stacktrace
+        run: |
+          ./gradlew \
+            :app:testFullDebugUnitTest \
+            --tests 'com.nuvio.tv.updater.*' \
+            --tests 'com.nuvio.tv.core.diagnostics.*' \
+            :app:assembleFullDebug \
+            --stacktrace
 
       - name: Upload fullDebug APK
         uses: actions/upload-artifact@v4
@@ -76,3 +86,37 @@ jobs:
           path: app/build/outputs/apk/full/debug/app-full-universal-debug.apk
           if-no-files-found: error
           retention-days: 7
+
+      - name: Publish direct-download NNTP test APK
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk_path="app/build/outputs/apk/full/debug/app-full-universal-debug.apk"
+          release_apk="NuvioTV-NNTP-test.apk"
+          notes_file="$RUNNER_TEMP/nntp-release-notes.txt"
+
+          cp "$apk_path" "$release_apk"
+
+          printf 'Build-SHA: %s\n\n%s\n' \
+            "$GITHUB_SHA" \
+            "Experimental native NNTP/Usenet playback build. Use only with providers and media you are authorized to access." \
+            > "$notes_file"
+
+          if ! gh release view nntp-testing >/dev/null 2>&1; then
+            gh release create nntp-testing \
+              --target "$GITHUB_SHA" \
+              --title "NuvioTV Native NNTP Test" \
+              --notes-file "$notes_file" \
+              --prerelease
+          fi
+
+          # Publish the build marker only after its APK is available.
+          gh release upload nntp-testing "$release_apk" --clobber
+
+          gh release edit nntp-testing \
+            --notes-file "$notes_file"
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/nuvio-test.jks"
