@@ -121,6 +121,11 @@ android {
         targetSdk = 36
         versionCode = 1058
         versionName = "0.9.2-beta"
+        buildConfigField(
+            "String",
+            "TEST_BUILD_SHA",
+            buildConfigString(providers.environmentVariable("GITHUB_SHA").orNull ?: "local")
+        )
 
         buildConfigField("String", "PARENTAL_GUIDE_API_URL", "\"${localProperties.getProperty("PARENTAL_GUIDE_API_URL", "")}\"")
         buildConfigField("String", "INTRODB_API_URL", "\"${localProperties.getProperty("INTRODB_API_URL", "")}\"")
@@ -211,6 +216,9 @@ android {
             isMinifyEnabled = false
 
             buildConfigField("boolean", "IS_DEBUG_BUILD", "true")
+            // Native NNTP test builds are published separately from upstream releases.
+            buildConfigField("String", "GITHUB_OWNER", "\"Magichouse227\"")
+            buildConfigField("String", "GITHUB_REPO", "\"NuvioTV\"")
             buildConfigField("String", "SENTRY_ENVIRONMENT", buildConfigString("debug"))
 
             // Dev environment (from local.dev.properties)

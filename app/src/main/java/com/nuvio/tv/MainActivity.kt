@@ -3,6 +3,7 @@ package com.nuvio.tv
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
@@ -127,6 +128,7 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.ModalNavigationDrawer
 import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
+import androidx.tv.material3.Button
 import androidx.tv.material3.Text
 import androidx.tv.material3.rememberDrawerState
 import coil3.compose.rememberAsyncImagePainter
@@ -136,6 +138,7 @@ import com.nuvio.tv.core.auth.AuthManager
 import com.nuvio.tv.core.auth.DeviceSessionRegistration
 import com.nuvio.tv.core.deeplink.DeepLinkHandler
 import com.nuvio.tv.core.deeplink.DeepLinkParser
+import com.nuvio.tv.core.diagnostics.CrashReportStore
 import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.core.sync.ProfileSyncService
 import com.nuvio.tv.core.sync.StartupSyncService
@@ -166,6 +169,7 @@ import com.nuvio.tv.domain.model.resolveCustomThemeColors
 import com.nuvio.tv.domain.deeplink.AppDeepLink
 import com.nuvio.tv.domain.repository.AddonRepository
 import com.nuvio.tv.ui.components.NuvioScrollDefaults
+import com.nuvio.tv.ui.components.NuvioDialog
 import com.nuvio.tv.ui.components.BrandWordmark
 import com.nuvio.tv.ui.components.LocalCardDepthStyle
 import com.nuvio.tv.ui.components.ProfileAvatarCircle
@@ -308,6 +312,9 @@ open class MainActivity : ComponentActivity() {
     @Inject
     lateinit var deepLinkHandler: DeepLinkHandler
 
+    @Inject
+    lateinit var crashReportStore: CrashReportStore
+
     private val pendingDeepLinkUrl = MutableStateFlow<String?>(null)
     private val pendingLaunchIntent = MutableStateFlow<Intent?>(null)
 
@@ -392,6 +399,17 @@ open class MainActivity : ComponentActivity() {
             val hasSeenAuthQrOnFirstLaunch by hasSeenAuthQrFlow.collectAsState(initial = null)
             val authState by authManager.authState.collectAsState()
             val context = LocalContext.current
+            var pendingCrashReport by remember { mutableStateOf(crashReportStore.read()) }
+
+            if (pendingCrashReport != null) {
+                CrashReportPrompt(
+                    report = pendingCrashReport.orEmpty(),
+                    onDismiss = {
+                        crashReportStore.clear()
+                        pendingCrashReport = null
+                    }
+                )
+            }
 
             LaunchedEffect(authSessionNoticeDataStore, context) {
                 authSessionNoticeDataStore.pendingNotice.collect { notice ->
@@ -2364,6 +2382,55 @@ private fun rememberRawSvgPainter(rawIconRes: Int): Painter {
             .size(sizePx)
             .build()
     )
+}
+
+@Composable
+private fun CrashReportPrompt(
+    report: String,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    NuvioDialog(
+        onDismiss = onDismiss,
+        title = stringResource(R.string.crash_report_prompt_title),
+        subtitle = stringResource(R.string.crash_report_prompt_subtitle)
+    ) {
+        Text(
+            text = stringResource(R.string.crash_report_prompt_privacy),
+            color = NuvioTheme.colors.TextSecondary,
+            style = androidx.tv.material3.MaterialTheme.typography.bodyMedium
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
+        ) {
+            Button(
+                onClick = {
+                    val issueUri = Uri.parse(
+                        "https://github.com/Magichouse227/NuvioTV/issues/new"
+                    ).buildUpon()
+                        .appendQueryParameter("title", "Native test build crash")
+                        // Keep the composer URL usable on TV browsers while retaining the
+                        // complete bounded report on disk until this action is selected.
+                        .appendQueryParameter("body", report.take(1_500))
+                        .build()
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, issueUri))
+                    }
+                    onDismiss()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(stringResource(R.string.crash_report_prompt_open))
+            }
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(stringResource(R.string.crash_report_prompt_dismiss))
+            }
+        }
+    }
 }
 
 object LocaleCache {

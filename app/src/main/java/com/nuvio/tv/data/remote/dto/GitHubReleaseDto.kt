@@ -6,6 +6,7 @@ import com.squareup.moshi.JsonClass
 @JsonClass(generateAdapter = true)
 data class GitHubReleaseDto(
     @Json(name = "tag_name") val tagName: String? = null,
+    @Json(name = "target_commitish") val targetCommitish: String? = null,
     val name: String? = null,
     val body: String? = null,
     val draft: Boolean = false,

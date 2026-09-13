@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nuvio.tv.LocaleCache
 import com.nuvio.tv.core.player.StreamAutoPlayPolicy
+import com.nuvio.tv.core.build.LowRamDevicePolicy
 import com.nuvio.tv.core.recommendations.TvRecommendationManager
 import com.nuvio.tv.core.tmdb.TmdbMetadataService
 import com.nuvio.tv.core.tmdb.TmdbService
@@ -221,7 +222,11 @@ class HomeViewModel @Inject constructor(
     internal var currentHeroCatalogKeys: List<String> = emptyList()
     internal var catalogUpdateJob: Job? = null
     internal var hasRenderedFirstCatalog = false
-    internal val catalogLoadSemaphore = Semaphore(MAX_CATALOG_LOAD_CONCURRENCY)
+    // Collection/catalog sources are network-heavy and can otherwise fan out during startup.
+    // Low-RAM TV sticks get one in-flight source; normal devices retain the existing throughput.
+    internal val catalogLoadSemaphore = Semaphore(
+        if (LowRamDevicePolicy.isLowRam(appContext)) 1 else MAX_CATALOG_LOAD_CONCURRENCY
+    )
     internal var pendingCatalogLoads = 0
     internal val activeCatalogLoadJobs = mutableSetOf<Job>()
     internal var activeCatalogLoadSignature: String? = null

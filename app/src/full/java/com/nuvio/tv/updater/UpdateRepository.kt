@@ -27,7 +27,7 @@ class UpdateRepository @Inject constructor(
                     }
                     listOf(response.body() ?: error("Empty GitHub release response"))
                 }
-                UpdateChannel.BETA -> {
+                UpdateChannel.BETA, UpdateChannel.FORK_TEST -> {
                     val response = gitHubReleaseApi.getReleases(owner = owner, repo = repo)
                     if (!response.isSuccessful) {
                         error("GitHub API error: ${response.code()}")
@@ -51,6 +51,12 @@ class UpdateRepository @Inject constructor(
 
             AppUpdate(
                 tag = tag,
+                buildMarker = dto.body
+                    ?.lineSequence()
+                    ?.firstOrNull { it.startsWith("Build-SHA:") }
+                    ?.substringAfter(':')
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() },
                 title = dto.name?.takeIf { it.isNotBlank() } ?: tag,
                 notes = dto.body.orEmpty(),
                 releaseUrl = dto.htmlUrl,

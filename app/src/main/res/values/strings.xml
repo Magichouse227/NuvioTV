@@ -101,6 +101,11 @@
     <string name="auth_notice_nuvio_logged_out">You have been signed out of Nuvio. Please sign in again.</string>
     <string name="auth_notice_trakt_logged_out">You have been signed out of Trakt. Please reconnect.</string>
     <string name="error_generic">An error occurred</string>
+    <string name="crash_report_prompt_title">The previous session stopped unexpectedly</string>
+    <string name="crash_report_prompt_subtitle">You can open a prefilled GitHub issue to help improve this test build.</string>
+    <string name="crash_report_prompt_privacy">The report is stored only on this device and sensitive values were redacted where possible.</string>
+    <string name="crash_report_prompt_open">Open GitHub issue</string>
+    <string name="crash_report_prompt_dismiss">Not now</string>
 
     <string name="action_retry">Retry</string>
     <string name="error_state_generic_issue">Something went wrong.</string>
@@ -404,9 +409,11 @@
     <string name="about_check_updates_subtitle">Download latest release</string>
     <string name="update_channel_stable">Stable</string>
     <string name="update_channel_beta">Beta</string>
+    <string name="update_channel_fork_test">NNTP test</string>
     <string name="update_channel_dialog_subtitle">Choose the type of updates you want to receive</string>
     <string name="update_channel_stable_description">Intended for everyday use.</string>
     <string name="update_channel_beta_description">Early updates that may contain bugs, break features, or behave unexpectedly.</string>
+    <string name="update_channel_fork_test_description">Native NNTP test releases from the Magichouse227 fork.</string>
     <string name="about_privacy_policy">Privacy Policy</string>
     <string name="about_privacy_policy_subtitle">View our privacy policy</string>
     <string name="support_nuvio_name">Support Nuvio</string>

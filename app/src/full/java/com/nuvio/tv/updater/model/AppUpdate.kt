@@ -2,6 +2,7 @@ package com.nuvio.tv.updater.model
 
 data class AppUpdate(
     val tag: String,
+    val buildMarker: String?,
     val title: String,
     val notes: String,
     val releaseUrl: String?,

@@ -60,6 +60,18 @@ class ReleaseSelectorTest {
         assertEquals(listOf("1.1.0"), selected.map { it.tagName })
     }
 
+    @Test
+    fun `fork test channel only selects nntp testing releases`() {
+        val releases = listOf(
+            release(tag = "nntp-testing", name = "nntp-testing", prerelease = true),
+            release(tag = "1.2.0-beta.1", prerelease = true)
+        )
+
+        val selected = ReleaseSelector.eligibleReleases(releases, UpdateChannel.FORK_TEST)
+
+        assertEquals(listOf("nntp-testing"), selected.map { it.tagName })
+    }
+
     private fun release(
         tag: String,
         name: String = tag,

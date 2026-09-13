@@ -32,6 +32,7 @@ internal fun UpdateChannelSettings(
     val channelName = when (state.updateChannel) {
         UpdateChannel.STABLE -> stringResource(R.string.update_channel_stable)
         UpdateChannel.BETA -> stringResource(R.string.update_channel_beta)
+        UpdateChannel.FORK_TEST -> stringResource(R.string.update_channel_fork_test)
     }
 
     SettingsActionRow(
@@ -77,6 +78,11 @@ internal fun UpdateChannelSettings(
                     value = UpdateChannel.BETA,
                     title = stringResource(R.string.update_channel_beta),
                     description = stringResource(R.string.update_channel_beta_description)
+                ),
+                SettingsPickerOption(
+                    value = UpdateChannel.FORK_TEST,
+                    title = stringResource(R.string.update_channel_fork_test),
+                    description = stringResource(R.string.update_channel_fork_test_description)
                 )
             ),
             selectedValue = state.updateChannel,

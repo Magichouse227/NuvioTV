@@ -57,7 +57,9 @@ class UpdateViewModel @Inject constructor(
                     updateChannel = channel
                 )
             }
-            if (enabled && !BuildConfig.IS_DEBUG_BUILD) {
+            // Debug/full test builds use the fork's nntp-testing channel; release
+            // builds retain the normal upstream stable/beta defaults.
+            if (enabled) {
                 checkForUpdates(force = false, showNoUpdateFeedback = false)
             }
         }
@@ -85,7 +87,12 @@ class UpdateViewModel @Inject constructor(
 
             result
                 .onSuccess { update ->
-                    val remoteNewer = VersionUtils.isRemoteNewer(update.tag, BuildConfig.VERSION_NAME)
+                    val remoteNewer = if (channel == UpdateChannel.FORK_TEST) {
+                        update.buildMarker != null &&
+                            update.buildMarker != BuildConfig.TEST_BUILD_SHA
+                    } else {
+                        VersionUtils.isRemoteNewer(update.tag, BuildConfig.VERSION_NAME)
+                    }
                     val shouldShow = UpdateBannerPolicy.shouldShow(
                         isRemoteNewer = remoteNewer,
                         force = force,
@@ -185,7 +192,7 @@ class UpdateViewModel @Inject constructor(
         }
         viewModelScope.launch {
             updatePreferences.setUpdateBannerEnabled(enabled)
-            if (enabled && changed && !BuildConfig.IS_DEBUG_BUILD) {
+            if (enabled && changed) {
                 checkForUpdates(force = false, showNoUpdateFeedback = false)
             }
         }
@@ -214,9 +221,7 @@ class UpdateViewModel @Inject constructor(
         }
         viewModelScope.launch {
             updatePreferences.setUpdateChannel(channel)
-            if (!BuildConfig.IS_DEBUG_BUILD) {
-                checkForUpdates(force = true, showNoUpdateFeedback = false)
-            }
+            checkForUpdates(force = true, showNoUpdateFeedback = false)
         }
     }
 

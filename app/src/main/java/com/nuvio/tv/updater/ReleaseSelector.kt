@@ -11,7 +11,17 @@ internal object ReleaseSelector {
     fun eligibleReleases(
         releases: List<GitHubReleaseDto>,
         channel: UpdateChannel
-    ): List<GitHubReleaseDto> = releases
+    ): List<GitHubReleaseDto> = if (channel == UpdateChannel.FORK_TEST) {
+        // The fork publishes a fixed, non-semver prerelease tag. Keep this channel
+        // deliberately isolated so it can never be selected by stable/beta updates.
+        releases.filterNot(GitHubReleaseDto::draft)
+            .filter { release ->
+                sequenceOf(release.tagName, release.name)
+                    .filterNotNull()
+                    .any { it.contains("nntp-testing", ignoreCase = true) }
+            }
+    } else {
+        releases
         .asSequence()
         .filterNot(GitHubReleaseDto::draft)
         .mapNotNull { release ->
@@ -26,6 +36,7 @@ internal object ReleaseSelector {
         .sortedByDescending(ReleaseCandidate::version)
         .map(ReleaseCandidate::release)
         .toList()
+    }
 
     private fun releaseVersion(release: GitHubReleaseDto): SemanticVersion? =
         VersionUtils.parse(release.tagName) ?: VersionUtils.parse(release.name)

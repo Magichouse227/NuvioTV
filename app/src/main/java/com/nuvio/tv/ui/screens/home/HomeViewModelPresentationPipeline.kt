@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import androidx.lifecycle.viewModelScope
 import com.nuvio.tv.LocaleCache
 import com.nuvio.tv.core.build.AppFeaturePolicy
+import com.nuvio.tv.core.build.LowRamDevicePolicy
 import com.nuvio.tv.core.network.NetworkResult
 import com.nuvio.tv.core.tmdb.TmdbEnrichment
 import com.nuvio.tv.domain.model.FocusedPosterTrailerPlaybackTarget
@@ -363,6 +364,9 @@ internal fun HomeViewModel.requestTrailerPreviewPipeline(
 ) {
     if (!AppFeaturePolicy.inAppTrailerPlaybackEnabled) return
     if (startupGracePeriodActive) return
+    // Trailer playback allocates a second video pipeline while the focused artwork is
+    // already resident. Avoid that extra pressure on low-memory TV hardware.
+    if (LowRamDevicePolicy.isLowRam(appContext)) return
 
     // Resolve fallbackYtId from catalog item if not provided
     val resolvedFallbackYtId = fallbackYtId ?: findCatalogItemById(itemId)?.trailerYtIds?.firstOrNull()

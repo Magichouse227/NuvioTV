@@ -19,6 +19,8 @@ import coil3.bitmapFactoryMaxParallelism
 
 import okio.Path.Companion.toOkioPath
 import com.nuvio.tv.core.diagnostics.SentryInitializer
+import com.nuvio.tv.core.diagnostics.CrashReportStore
+import com.nuvio.tv.core.build.LowRamDevicePolicy
 import com.nuvio.tv.core.image.StaleWhileRevalidateCacheStrategy
 import com.nuvio.tv.core.runtime.PluginRuntimeHooks
 import com.nuvio.tv.core.sync.StartupSyncService
@@ -44,6 +46,7 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
     @Inject lateinit var sentrySettingsDataStore: SentrySettingsDataStore
     @Inject lateinit var imagePerformancePreferences: ImagePerformancePreferences
     @Inject lateinit var simklAnimeIdPreferenceHolder: SimklAnimeIdPreferenceHolder
+    @Inject lateinit var crashReportStore: CrashReportStore
 
     companion object {
         /**
@@ -78,6 +81,8 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
     override fun onCreate() {
         super.onCreate()
         SentryInitializer.start(this, sentrySettingsDataStore)
+        // Install last so this wrapper also preserves Sentry's handler when enabled.
+        crashReportStore.installUncaughtExceptionHandler()
         PluginRuntimeHooks.onApplicationCreate(this)
         androidTvChannelSyncService.start()
         // Load locale synchronously so it's available before Activity.attachBaseContext.
@@ -88,10 +93,11 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {
+        val lowRamDevice = LowRamDevicePolicy.isLowRam(context)
         val imageOkHttpClient by lazy {
             val imageDispatcher = okhttp3.Dispatcher().apply {
-                maxRequests = 32
-                maxRequestsPerHost = 16
+                maxRequests = if (lowRamDevice) 8 else 32
+                maxRequestsPerHost = if (lowRamDevice) 4 else 16
             }
             OkHttpClient.Builder()
                 .dispatcher(imageDispatcher)
@@ -163,8 +169,8 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
             .crossfade(false)
             .precision(coil3.size.Precision.INEXACT)
             .allowHardware(false)
-            .allowRgb565(imagePerformancePreferences.rgb565Enabled)
-            .bitmapFactoryMaxParallelism(4)
+            .allowRgb565(lowRamDevice || imagePerformancePreferences.rgb565Enabled)
+            .bitmapFactoryMaxParallelism(if (lowRamDevice) 1 else 4)
             .build()
     }
 }

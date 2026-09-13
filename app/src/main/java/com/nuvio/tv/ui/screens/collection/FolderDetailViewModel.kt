@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nuvio.tv.R
 import com.nuvio.tv.core.build.AppFeaturePolicy
+import com.nuvio.tv.core.build.LowRamDevicePolicy
 import com.nuvio.tv.core.network.NetworkResult
 import com.nuvio.tv.core.tmdb.TmdbCollectionSourceResolver
 import com.nuvio.tv.core.util.hasNoReleaseInfo
@@ -54,6 +55,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import javax.inject.Inject
 
 data class FolderDetailUiState(
@@ -149,6 +152,9 @@ class FolderDetailViewModel @Inject constructor(
     private val modernCarouselRowBuildCache = ModernCarouselRowBuildCache()
     private var activeTrailerPreviewItemId: String? = null
     private var trailerPreviewRequestVersion: Long = 0L
+    private val lowRamDevice = LowRamDevicePolicy.isLowRam(appContext)
+    private val sourceLoadSemaphore = Semaphore(if (lowRamDevice) 1 else 3)
+    private var modernPresentationJob: Job? = null
 
     /** Items for which enrichment was attempted but produced no enriched data. */
     private val _failedEnrichmentIds = MutableStateFlow<Set<String>>(emptySet())
@@ -342,7 +348,8 @@ class FolderDetailViewModel @Inject constructor(
                     modernHeroFullScreenBackdropEnabled = modernFullScreenBackdrop,
                     focusedPosterBackdropExpandEnabled = focusedPosterBackdropExpandEnabled,
                     focusedPosterBackdropExpandDelaySeconds = focusedPosterBackdropExpandDelaySeconds,
-                    focusedPosterBackdropTrailerEnabled = focusedPosterBackdropTrailerEnabled &&
+                    focusedPosterBackdropTrailerEnabled = !lowRamDevice &&
+                        focusedPosterBackdropTrailerEnabled &&
                         AppFeaturePolicy.inAppTrailerPlaybackEnabled,
                     focusedPosterBackdropTrailerMuted = focusedPosterBackdropTrailerMuted,
                     focusedPosterBackdropTrailerPlaybackTarget = focusedPosterBackdropTrailerPlaybackTarget,
@@ -517,7 +524,8 @@ class FolderDetailViewModel @Inject constructor(
         // Build modern presentation off the main thread to avoid jank.
         val needsModernPresentation = _uiState.value.homeLayout == HomeLayout.MODERN
         if (needsModernPresentation) {
-            viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            modernPresentationJob?.cancel()
+            modernPresentationJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
                 val tmdbSettings = tmdbSettingsDataStore.settings.first()
                 val currentHomeLayout = _uiState.value.homeLayout
                 val tmdbEnabledForModern = tmdbSettings.enabled &&
@@ -629,8 +637,13 @@ class FolderDetailViewModel @Inject constructor(
         }
     }
 
-    private fun loadAddonCatalogForTab(tabIndex: Int, source: AddonCatalogCollectionSource) {
+    private fun launchInitialSourceLoad(block: suspend () -> Unit): Job =
         viewModelScope.launch {
+            sourceLoadSemaphore.withPermit { block() }
+        }
+
+    private fun loadAddonCatalogForTab(tabIndex: Int, source: AddonCatalogCollectionSource) {
+        launchInitialSourceLoad {
             val addons = addonRepository.getInstalledAddons().first().enabledAddons()
             val addon = addons.find { it.id == source.addonId }
 
@@ -915,7 +928,7 @@ class FolderDetailViewModel @Inject constructor(
             rebuildAllTab()
             rebuildFollowLayoutState()
         }
-        viewModelScope.launch {
+        launchInitialSourceLoad {
             tmdbCollectionSourceResolver.resolve(source, page).collect { result ->
                 when (result) {
                     is NetworkResult.Success -> {
@@ -976,7 +989,7 @@ class FolderDetailViewModel @Inject constructor(
             rebuildAllTab()
             rebuildFollowLayoutState()
         }
-        viewModelScope.launch {
+        launchInitialSourceLoad {
             traktPublicListSourceResolver.resolve(source, page).collect { result ->
                 when (result) {
                     is NetworkResult.Success -> {
