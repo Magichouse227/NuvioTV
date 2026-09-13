@@ -1,0 +1,37 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "nuvio-kotlin",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^e: (?:file://)?(.+?):([0-9]+):([0-9]+):?\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "message": 4
+        }
+      ]
+    },
+    {
+      "owner": "nuvio-gradle-error",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^(?:e: |ERROR: |error: |Caused by: |\\s*> )(.+)$",
+          "message": 1
+        }
+      ]
+    },
+    {
+      "owner": "nuvio-gradle-failure",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^(Execution failed for task .+|.* > .* FAILED)$",
+          "message": 1
+        }
+      ]
+    }
+  ]
+}

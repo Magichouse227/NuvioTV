@@ -10,3 +10,9 @@ plugins {
     alias(libs.plugins.androidx.baselineprofile) apply false
     alias(libs.plugins.sentry.android.gradle) apply false
 }
+
+// Surface Kotlin/AAPT failures through the Checks API as well as downloadable job logs.
+// This is diagnostic only; it never changes whether a build succeeds or fails.
+if (providers.environmentVariable("GITHUB_ACTIONS").orNull == "true") {
+    println("::add-matcher::${rootDir.resolve("scripts/ci-problem-matchers.json").absolutePath}")
+}
