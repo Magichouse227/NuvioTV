@@ -68,10 +68,9 @@ type claimedSegment struct {
 	req   *inflightSegmentDownload
 }
 
-// ReadAheadRange warms segments [from, to) in the background without counting
-// failures toward IsFailed(). Segments already being fetched are left to the
-// fetch that owns them; the rest are grouped per readAheadBatchSize and handed
-// to the fetcher's pipelined path when it has one.
+// ReadAheadRange warms segments [from, to) in the background. Segments already
+// being fetched are left to the fetch that owns them; the rest are grouped per
+// readAheadBatchSize and handed to the fetcher's pipelined path when it has one.
 func (f *File) ReadAheadRange(ctx context.Context, from, to int) {
 	if from < 0 {
 		from = 0
@@ -101,9 +100,6 @@ func (f *File) ReadAheadRange(ctx context.Context, from, to int) {
 	claims := make([]claimedSegment, 0, to-from)
 	inFlight := 0
 	for i := from; i < to; i++ {
-		if f.isZeroFilled(i) {
-			continue
-		}
 		req, leader := f.startInflightDownload(i, false)
 		if !leader {
 			// Someone else owns this one; we are not among its waiters.
@@ -160,7 +156,7 @@ func (f *File) fetchWidth() int {
 // publishes each result. Segments the pipeline could not deliver — a 430, a
 // connection that dropped mid-batch, a provider that never had them — fall back
 // to the ordinary per-segment path, which is where provider failover, retries
-// and the zero-fill policy live.
+// and strict source-integrity handling live.
 func (f *File) runPipelinedReadAhead(ctx context.Context, batcher SegmentBatchFetcher, batch []claimedSegment) {
 	segments := make([]*nzb.Segment, len(batch))
 	for i, c := range batch {

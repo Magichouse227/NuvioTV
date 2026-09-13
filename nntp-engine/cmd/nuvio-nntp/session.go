@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -25,7 +26,7 @@ import (
 
 const (
 	maxNZBSize                = 64 << 20
-	sessionSegmentCacheMB     = 64
+	totalSegmentCacheMB       = 64
 	providerValidationTimeout = 15 * time.Second
 	mediaPreparationTimeout   = 75 * time.Second
 )
@@ -57,9 +58,10 @@ type engineSession struct {
 	openMu    sync.Mutex
 	blueprint unpack.Blueprint
 	closeOnce sync.Once
+	diagnosticCreated atomic.Bool
 }
 
-func newEngineSession(request createSessionRequest, httpClient *http.Client, providerCache *providerClientCache) (*engineSession, error) {
+func newEngineSession(request createSessionRequest, httpClient *http.Client, providerCache *providerClientCache, cacheBudget *usenetpool.SegmentCacheBudget) (*engineSession, error) {
 	startupStarted := time.Now()
 	providers, err := parseProviders(request.Servers)
 	if err != nil {
@@ -129,7 +131,7 @@ func newEngineSession(request createSessionRequest, httpClient *http.Client, pro
 	)
 	clients := providerLease.clients()
 	segmentCache := usenetpool.NewMemorySegmentCacheWithBudget(
-		usenetpool.NewSegmentCacheBudget(sessionSegmentCacheMB),
+		cacheBudget,
 	)
 	pool, err := usenetpool.NewPool(&usenetpool.Config{
 		Providers:    providerLease.configs(),
@@ -217,6 +219,8 @@ func newEngineSession(request createSessionRequest, httpClient *http.Client, pro
 		return nil, fmt.Errorf("failed to prepare NZB media: %w", prepareResult.err)
 	}
 	leaseOwned = false
+	session.diagnosticCreated.Store(true)
+	log.Printf("NUVIO_DIAG event=session_created")
 	logger.Info("NNTP session ready", "session", id, "duration_ms", time.Since(startupStarted).Milliseconds(), "files", len(files))
 	return session, nil
 }
@@ -326,6 +330,9 @@ func (s *engineSession) close() {
 		if s.cache != nil {
 			s.cache.Purge()
 		}
+		if s.diagnosticCreated.Load() {
+			log.Printf("NUVIO_DIAG event=session_closed")
+		}
 	})
 }
 
@@ -419,6 +426,7 @@ type sessionRegistry struct {
 	ttl         time.Duration
 	httpClient  *http.Client
 	providers   *providerClientCache
+	cacheBudget *usenetpool.SegmentCacheBudget
 	stopCh      chan struct{}
 	stopOnce    sync.Once
 }
@@ -442,6 +450,7 @@ func newSessionRegistry(maxSessions int, ttl time.Duration) *sessionRegistry {
 		ttl:         ttl,
 		httpClient:  client,
 		providers:   newProviderClientCache(),
+		cacheBudget: usenetpool.NewSegmentCacheBudget(totalSegmentCacheMB),
 		stopCh:      make(chan struct{}),
 	}
 	go registry.cleanupLoop()
@@ -449,7 +458,7 @@ func newSessionRegistry(maxSessions int, ttl time.Duration) *sessionRegistry {
 }
 
 func (r *sessionRegistry) create(request createSessionRequest) (*engineSession, error) {
-	session, err := newEngineSession(request, r.httpClient, r.providers)
+	session, err := newEngineSession(request, r.httpClient, r.providers, r.cacheBudget)
 	if err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ import (
 	"streamnzb/pkg/core/logger"
 	"streamnzb/pkg/media/decode"
 	"streamnzb/pkg/media/nzb"
+	"streamnzb/pkg/usenet/nntp"
 	"streamnzb/pkg/usenet/pool"
 )
 
@@ -194,7 +195,7 @@ func TestDownloadSegmentDeduplicatesConcurrentCalls(t *testing.T) {
 	}
 }
 
-func TestConcurrentDownloadFailureCountsOnce(t *testing.T) {
+func TestConcurrentMissingDownloadReturnsSameSourceError(t *testing.T) {
 	fetcher := newDedupBlockingSegmentFetcher(nil, fmt.Errorf("fetch segment: %w", &textproto.Error{Code: 430, Msg: "No Such Article"}))
 	f := NewFile(context.Background(), testNZBFileWithSegments(3, 4), nil, fetcher)
 
@@ -224,15 +225,15 @@ func TestConcurrentDownloadFailureCountsOnce(t *testing.T) {
 
 	fetcher.Release()
 	for i := 0; i < 2; i++ {
-		if err := <-errs; err != nil {
-			t.Fatalf("DownloadSegment returned error: %v", err)
+		if err := <-errs; !nntp.IsArticleNotFound(err) {
+			t.Fatalf("DownloadSegment error = %v, want missing-article error", err)
 		}
-		if got := <-results; len(got) != 4 {
-			t.Fatalf("expected zero-filled segment of length 4, got %d", len(got))
+		if got := <-results; len(got) != 0 {
+			t.Fatalf("expected no synthetic segment data, got %d bytes", len(got))
 		}
 	}
-	if got := f.ZeroFilledSegments(); got != 1 {
-		t.Fatalf("expected one shared zero-fill count, got %d", got)
+	if !f.IsFailed() {
+		t.Fatal("a shared confirmed missing article must fail the source")
 	}
 }
 

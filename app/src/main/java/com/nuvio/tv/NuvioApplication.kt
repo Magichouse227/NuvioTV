@@ -20,6 +20,8 @@ import coil3.bitmapFactoryMaxParallelism
 import okio.Path.Companion.toOkioPath
 import com.nuvio.tv.core.diagnostics.SentryInitializer
 import com.nuvio.tv.core.diagnostics.CrashReportStore
+import com.nuvio.tv.core.diagnostics.DiagnosticLog
+import com.nuvio.tv.core.diagnostics.DiagnosticReportStore
 import com.nuvio.tv.core.build.LowRamDevicePolicy
 import com.nuvio.tv.core.image.StaleWhileRevalidateCacheStrategy
 import com.nuvio.tv.core.runtime.PluginRuntimeHooks
@@ -37,6 +39,10 @@ import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 @HiltAndroidApp
 class NuvioApplication : Application(), SingletonImageLoader.Factory {
@@ -47,6 +53,8 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
     @Inject lateinit var imagePerformancePreferences: ImagePerformancePreferences
     @Inject lateinit var simklAnimeIdPreferenceHolder: SimklAnimeIdPreferenceHolder
     @Inject lateinit var crashReportStore: CrashReportStore
+    @Inject lateinit var diagnosticReportStore: DiagnosticReportStore
+    private val diagnosticsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     companion object {
         /**
@@ -80,6 +88,11 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticLog.install(diagnosticReportStore)
+        diagnosticsScope.launch {
+            diagnosticReportStore.initialize()
+            DiagnosticLog.record("app", "Application process started")
+        }
         SentryInitializer.start(this, sentrySettingsDataStore)
         // Install last so this wrapper also preserves Sentry's handler when enabled.
         crashReportStore.installUncaughtExceptionHandler()

@@ -1,10 +1,13 @@
 package com.nuvio.tv.core.usenet
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.nuvio.tv.R
+import com.nuvio.tv.core.diagnostics.DiagnosticLog
 import com.nuvio.tv.core.network.IPv4FirstDns
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -34,6 +37,7 @@ class NntpEngineBinary @Inject constructor(
     }
 
     private val lifecycleMutex = Mutex()
+    @Volatile
     private var process: Process? = null
     val managementToken: String = loadOrCreateManagementToken()
     private val healthClient = OkHttpClient.Builder()
@@ -63,6 +67,7 @@ class NntpEngineBinary @Inject constructor(
     suspend fun start() = lifecycleMutex.withLock {
         withContext(Dispatchers.IO) {
             if (isRunning()) return@withContext
+            if (NntpProcessCompat.isAlive(process)) stopProcess()
             stopOrphanedProcess()
 
             if (!isBinaryAvailable) {
@@ -80,23 +85,35 @@ class NntpEngineBinary @Inject constructor(
                 managementToken
             )
                 .redirectErrorStream(true)
+                .apply {
+                    // A soft Go-heap budget, not a claim that the whole process is capped.
+                    environment()["GOMEMLIMIT"] = "96MiB"
+                }
                 .start()
             process = newProcess
+            DiagnosticLog.record("nntp", "event=process_start")
             drainOutput(newProcess)
 
-            val deadline = System.currentTimeMillis() + STARTUP_TIMEOUT_MS
-            while (System.currentTimeMillis() < deadline) {
-                if (isRunning()) {
-                    Log.d(TAG, "NNTP engine started on loopback")
-                    return@withContext
+            try {
+                val deadline = SystemClock.elapsedRealtime() + STARTUP_TIMEOUT_MS
+                while (SystemClock.elapsedRealtime() < deadline) {
+                    if (isRunning()) {
+                        DiagnosticLog.record("nntp", "event=process_ready")
+                        Log.d(TAG, "NNTP engine started on loopback")
+                        return@withContext
+                    }
+                    if (!NntpProcessCompat.isAlive(newProcess)) {
+                        process = null
+                        throw NntpException(context.getString(R.string.nntp_error_process_died))
+                    }
+                    delay(HEALTH_CHECK_INTERVAL_MS)
                 }
-                if (!isProcessAlive(newProcess)) {
-                    process = null
-                    throw NntpException(context.getString(R.string.nntp_error_process_died))
-                }
-                delay(HEALTH_CHECK_INTERVAL_MS)
+            } catch (cancelled: CancellationException) {
+                stopProcess()
+                throw cancelled
             }
 
+            DiagnosticLog.record("nntp", "event=start_timeout")
             stopProcess()
             throw NntpException(
                 context.getString(
@@ -120,12 +137,16 @@ class NntpEngineBinary @Inject constructor(
                 .build()
             healthClient.newCall(request).execute().close()
             Thread.sleep(500)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
         } catch (_: Exception) {
             // No previous loopback process is responding.
         }
     }
 
     private fun stopProcess() {
+        DiagnosticLog.record("nntp", "event=process_stop_requested")
         try {
             val request = Request.Builder()
                 .url("$baseUrl/shutdown")
@@ -139,9 +160,17 @@ class NntpEngineBinary @Inject constructor(
 
         process?.let { current ->
             try {
-                if (!current.waitFor(2, TimeUnit.SECONDS)) current.destroyForcibly()
-            } catch (_: Exception) {
-                current.destroyForcibly()
+                if (!NntpProcessCompat.waitForExit(current, 2_000)) {
+                    current.destroy()
+                    if (!NntpProcessCompat.waitForExit(current, 500)) {
+                        // Keep ownership; don't start a second child over an unreaped process.
+                        throw NntpException("NNTP engine did not stop")
+                    }
+                }
+            } catch (interrupted: InterruptedException) {
+                current.destroy()
+                Thread.currentThread().interrupt()
+                throw interrupted
             }
         }
         process = null
@@ -153,23 +182,23 @@ class NntpEngineBinary @Inject constructor(
                 current.inputStream.bufferedReader().use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
-                        Log.i(TAG, line)
+                        NntpNativeDiagnostics.parse(line)?.let { event ->
+                            DiagnosticLog.record("nntp", event)
+                            Log.i(TAG, event)
+                        }
                     }
                 }
             } catch (_: Exception) {
                 // Process shutdown closes the stream.
+            } finally {
+                val exit = try { current.exitValue() } catch (_: IllegalThreadStateException) { null }
+                DiagnosticLog.record("nntp", "event=process_output_closed exit=${exit ?: "unknown"}")
             }
         }.apply {
             name = "nuvio-nntp-output"
             isDaemon = true
             start()
         }
-    }
-
-    private fun isProcessAlive(current: Process?): Boolean = try {
-        current?.isAlive == true
-    } catch (_: Exception) {
-        false
     }
 
     private fun loadOrCreateManagementToken(): String {

@@ -167,8 +167,8 @@ func shouldProbeMiddleSegment(_ context.Context, segments []*Segment) bool {
 // the middle segment when uniform NZB bytes need slow-mode calibration.
 //
 // Segments without a message id — numbering-gap placeholders and id-less
-// originals — are never chosen: a probe of one can only zero-fill, and its
-// filler length would then stand in for the real decoded size of a whole class.
+// originals — are never chosen: a probe cannot fetch them, and their declared
+// length is not evidence for the real decoded size of a whole class.
 func segmentProbeIndices(segments []*Segment, knownByNZBBytes map[int64]int64, includeMiddle bool, skipGapProbing bool) []int {
 	if len(segments) == 0 {
 		return nil

@@ -14,9 +14,13 @@ import (
 	"streamnzb/pkg/media/loader"
 )
 
-// ErrTooManyZeroFills is re-exported from the loader layer, which owns the
-// zero-fill threshold, so existing callers keep matching one sentinel.
-var ErrTooManyZeroFills = loader.ErrTooManyZeroFills
+// ErrSegmentUnavailable is re-exported from the loader layer so archive
+// selection can classify a definitive source-integrity failure.
+var ErrSegmentUnavailable = loader.ErrSegmentUnavailable
+
+// ErrTooManyZeroFills is retained for source compatibility. Media reads no
+// longer synthesize zero-filled segments.
+var ErrTooManyZeroFills = ErrSegmentUnavailable
 var ErrEpisodeTargetNotFound = errors.New("requested episode not found in release")
 
 type ReadSeekCloser interface {

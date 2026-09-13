@@ -2,6 +2,7 @@ package com.nuvio.tv.core.usenet
 
 import com.nuvio.tv.core.network.IPv4FirstDns
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -48,42 +49,52 @@ class NntpEngineApi @Inject constructor(
         .dns(IPv4FirstDns())
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    suspend fun createSession(sessionRequest: NntpSessionRequest): NntpSession =
-        withContext(Dispatchers.IO) {
-            val payload = JSONObject().apply {
-                put("nzbUrl", sessionRequest.nzbUrl)
-                put("servers", JSONArray(sessionRequest.servers))
-                sessionRequest.fileIdx?.let { put("fileIdx", it) }
-                sessionRequest.fileMustInclude?.takeIf { it.isNotBlank() }
-                    ?.let { put("fileMustInclude", it) }
-                sessionRequest.season?.takeIf { it > 0 }?.let { put("season", it) }
-                sessionRequest.episode?.takeIf { it > 0 }?.let { put("episode", it) }
-            }
-            val request = Request.Builder()
-                .url("${binary.baseUrl}/v1/sessions")
-                .header(NntpEngineBinary.MANAGEMENT_TOKEN_HEADER, binary.managementToken)
-                .post(payload.toString().toRequestBody(JSON_TYPE))
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                val responseText = response.body.string()
-                if (!response.isSuccessful) {
-                    val message = runCatching {
-                        JSONObject(responseText).optString("error")
-                    }.getOrNull().orEmpty().ifBlank { "HTTP ${response.code}" }
-                    throw NntpException(message)
-                }
-                val json = JSONObject(responseText)
-                val id = json.optString("id")
-                val streamUrl = json.optString("streamUrl")
-                if (id.isBlank() || streamUrl.isBlank()) {
-                    throw NntpException("NNTP engine returned an invalid session")
-                }
-                NntpSession(id = id, streamUrl = streamUrl)
-            }
+    suspend fun createSession(
+        sessionRequest: NntpSessionRequest,
+        onSessionCreated: (String) -> Unit = {}
+    ): NntpSession = withContext(NonCancellable + Dispatchers.IO) {
+        val payload = JSONObject().apply {
+            put("nzbUrl", sessionRequest.nzbUrl)
+            put("servers", JSONArray(sessionRequest.servers))
+            sessionRequest.fileIdx?.let { put("fileIdx", it) }
+            sessionRequest.fileMustInclude?.takeIf { it.isNotBlank() }
+                ?.let { put("fileMustInclude", it) }
+            sessionRequest.season?.takeIf { it > 0 }?.let { put("season", it) }
+            sessionRequest.episode?.takeIf { it > 0 }?.let { put("episode", it) }
         }
+        val request = Request.Builder()
+            .url("${binary.baseUrl}/v1/sessions")
+            .header(NntpEngineBinary.MANAGEMENT_TOKEN_HEADER, binary.managementToken)
+            .post(payload.toString().toRequestBody(JSON_TYPE))
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            val responseText = response.body.string()
+            if (!response.isSuccessful) {
+                val message = runCatching {
+                    JSONObject(responseText).optString("error")
+                }.getOrNull().orEmpty().ifBlank { "HTTP ${response.code}" }
+                throw NntpException(message)
+            }
+            val json = JSONObject(responseText)
+            val id = json.optString("id")
+            if (id.isBlank()) {
+                throw NntpException("NNTP engine returned an invalid session")
+            }
+            // This callback must run before the NonCancellable IO context returns. The
+            // caller can therefore delete a session even if cancellation wins while the
+            // response is being dispatched back to its cancelled coroutine.
+            onSessionCreated(id)
+            val streamUrl = json.optString("streamUrl")
+            if (streamUrl.isBlank()) {
+                throw NntpException("NNTP engine returned an invalid session")
+            }
+            NntpSession(id = id, streamUrl = streamUrl)
+        }
+    }
 
     suspend fun getStats(sessionId: String): NntpSessionStats? = withContext(Dispatchers.IO) {
         val request = Request.Builder()
@@ -105,7 +116,7 @@ class NntpEngineApi @Inject constructor(
         }
     }
 
-    suspend fun deleteSession(sessionId: String) = withContext(Dispatchers.IO) {
+    suspend fun deleteSession(sessionId: String) = withContext(NonCancellable + Dispatchers.IO) {
         val request = Request.Builder()
             .url("${binary.baseUrl}/v1/sessions/$sessionId")
             .header(NntpEngineBinary.MANAGEMENT_TOKEN_HEADER, binary.managementToken)

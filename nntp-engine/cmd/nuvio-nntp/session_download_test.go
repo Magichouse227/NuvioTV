@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	usenetpool "streamnzb/pkg/usenet/pool"
 )
 
 const validNZB = `<?xml version="1.0"?><nzb><file subject="Movie.mkv"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="10" number="1">message-id</segment></segments></file></nzb>`
@@ -48,4 +51,34 @@ func TestDownloadAndParseNZBRejectsOversizedContentLength(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "64 MiB") {
 		t.Fatalf("error = %v, want size limit error", err)
 	}
+}
+
+func TestSessionRegistryUsesOneBoundedSegmentCacheBudget(t *testing.T) {
+	registry := newSessionRegistry(2, time.Minute)
+	defer registry.closeAll()
+
+	if got := registry.cacheBudget.MaxBytes(); got != int64(totalSegmentCacheMB<<20) {
+		t.Fatalf("shared cache budget = %d, want %d", got, int64(totalSegmentCacheMB<<20))
+	}
+	limit := registry.cacheBudget.MaxBytes()
+	if !registry.cacheBudget.Reserve(limit) {
+		t.Fatal("shared cache budget did not reserve its exact limit")
+	}
+	if registry.cacheBudget.Reserve(1) {
+		t.Fatal("shared cache budget exceeded its configured total limit")
+	}
+	registry.cacheBudget.Release(limit)
+	first := usenetpool.NewMemorySegmentCacheWithBudget(registry.cacheBudget)
+	second := usenetpool.NewMemorySegmentCacheWithBudget(registry.cacheBudget)
+	first.Set("first", usenetpool.SegmentData{Body: []byte("abc")})
+	second.Set("second", usenetpool.SegmentData{Body: []byte("de")})
+	if got := registry.cacheBudget.CurrentBytes(); got != 5 {
+		t.Fatalf("shared cache usage = %d, want 5 across both sessions", got)
+	}
+
+	first.Purge()
+	if got := registry.cacheBudget.CurrentBytes(); got != 2 {
+		t.Fatalf("purging one session released %d bytes, want other session retained", 5-got)
+	}
+	second.Purge()
 }

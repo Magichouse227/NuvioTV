@@ -11,6 +11,7 @@ plugins {
 
 import java.io.File
 import java.util.Properties
+import org.gradle.api.GradleException
 import org.gradle.api.tasks.Sync
 
 fun parseBooleanProperty(value: String?): Boolean {
@@ -108,6 +109,48 @@ val generateNntpLegalAssets by tasks.registering(Sync::class) {
     from(rootProject.file("nntp-engine/UPSTREAM.md")) {
         rename { "streamnzb-UPSTREAM.md" }
     }
+}
+
+val nntpEngineDir = rootProject.layout.projectDirectory.dir("nntp-engine")
+val nntpEngineBuildScript = rootProject.layout.projectDirectory.file("nntp-engine/build-android.sh")
+val nntpEngineWindowsBuildScript =
+    rootProject.layout.projectDirectory.file("nntp-engine/build-android.ps1")
+val nntpEngineAbis = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+val nntpEngineOutputs = nntpEngineAbis.map { abi ->
+    rootProject.layout.projectDirectory.file("app/src/main/jniLibs/$abi/libnuvionntp.so")
+}
+val nntpEngineGoInputs = fileTree(nntpEngineDir) {
+    include("**/*.go")
+    include("go.mod", "go.sum")
+    exclude(
+        "**/.git/**",
+        "**/.gradle/**",
+        "**/build/**",
+        "**/tmp/**",
+        "**/.cache/**",
+        "**/node_modules/**"
+    )
+}
+
+/*
+ * Keep the checked-in JNI files useful for source distributions, but never let
+ * an APK build silently package them when the native toolchain is unavailable.
+ * The toolchain check has no outputs on purpose and therefore runs even when
+ * the compilation task is up to date. The compilation itself remains
+ * incremental over the Go source/module files and all four ABI outputs.
+ */
+val verifyNntpEngineToolchain by tasks.registering {
+    group = "build"
+    description = "Checks the Go and Android NDK toolchain for the NNTP engine."
+}
+val buildNntpEngine by tasks.registering {
+    group = "build"
+    description = "Builds the NNTP engine PIE executable for every packaged ABI."
+    inputs.files(nntpEngineGoInputs)
+    inputs.file(nntpEngineBuildScript)
+    inputs.file(nntpEngineWindowsBuildScript)
+    outputs.files(nntpEngineOutputs)
+    dependsOn(verifyNntpEngineToolchain)
 }
 
 android {
@@ -359,6 +402,84 @@ android {
 }
 
 androidComponents {
+    val nntpEngineNdkDirectory = sdkComponents.ndkDirectory
+    verifyNntpEngineToolchain.configure {
+        inputs.property(
+            "androidNdkDirectory",
+            nntpEngineNdkDirectory.map { it.asFile.absolutePath }
+        )
+        doLast {
+            val ndkHome = nntpEngineNdkDirectory.get().asFile
+            if (!ndkHome.isDirectory) {
+                throw GradleException(
+                    "Android NDK ${android.ndkVersion} was not resolved at ${ndkHome.absolutePath}."
+                )
+            }
+
+            val goCommand = providers.environmentVariable("GO_COMMAND").orNull ?: "go"
+            val goResult = try {
+                project.exec {
+                    commandLine(goCommand, "version")
+                    isIgnoreExitValue = true
+                }
+            } catch (error: Exception) {
+                throw GradleException(
+                    "The NNTP native build requires Go on PATH (tried '$goCommand').",
+                    error
+                )
+            }
+            if (goResult.exitValue != 0) {
+                throw GradleException(
+                    "The NNTP native build requires a working Go command (tried '$goCommand')."
+                )
+            }
+        }
+    }
+    buildNntpEngine.configure {
+        inputs.property(
+            "androidNdkDirectory",
+            nntpEngineNdkDirectory.map { it.asFile.absolutePath }
+        )
+        doLast {
+            val ndkHome = nntpEngineNdkDirectory.get().asFile
+            val buildScript = if (System.getProperty("os.name").startsWith("Windows")) {
+                nntpEngineWindowsBuildScript.asFile
+            } else {
+                nntpEngineBuildScript.asFile
+            }
+            if (!buildScript.isFile) {
+                throw GradleException(
+                    "Missing NNTP native build script: ${buildScript.absolutePath}"
+                )
+            }
+
+            try {
+                project.exec {
+                    environment("ANDROID_NDK_HOME", ndkHome.absolutePath)
+                    if (System.getProperty("os.name").startsWith("Windows")) {
+                        commandLine(
+                            "powershell",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            buildScript.absolutePath,
+                            "-NdkHome",
+                            ndkHome.absolutePath
+                        )
+                    } else {
+                        commandLine("bash", buildScript.absolutePath)
+                    }
+                }
+            } catch (error: Exception) {
+                throw GradleException(
+                    "NNTP native engine compilation failed; refusing to package stale JNI binaries.",
+                    error
+                )
+            }
+        }
+    }
     onVariants { variant ->
         val isFullDebug = variant.buildType == "debug" &&
             variant.productFlavors.any { it.second == "full" }
@@ -432,6 +553,7 @@ sentry {
 
 tasks.named("preBuild") {
     dependsOn(generateNntpLegalAssets)
+    dependsOn(buildNntpEngine)
 }
 
 dependencies {

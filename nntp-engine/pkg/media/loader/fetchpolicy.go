@@ -10,10 +10,18 @@ import (
 // segments, so the archive layer depends on the segment layer and not the
 // other way around.
 
-// ErrTooManyZeroFills marks a read that gave up after too many segments could
-// not be fetched, so the gaps were zero-filled past the tolerated threshold.
-// Callers treat it as evidence the release itself is bad, not a transient blip.
-var ErrTooManyZeroFills = errors.New("too many failed segments")
+var (
+	// ErrSegmentUnavailable marks a definitive source-integrity failure: the
+	// NZB omits an article or every configured provider reports it unavailable.
+	// Callers must fail or select another source rather than fabricate media
+	// bytes.
+	ErrSegmentUnavailable = errors.New("segment unavailable")
+
+	// ErrTooManyZeroFills is retained for source compatibility. Missing
+	// segments are no longer zero-filled, so it aliases the strict
+	// source-integrity error.
+	ErrTooManyZeroFills = ErrSegmentUnavailable
+)
 
 // PlaybackReadAheadSegments is the playback read-ahead window, in segments,
 // while the article size is still unknown — before the segment map is built

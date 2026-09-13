@@ -102,9 +102,9 @@
     <string name="auth_notice_trakt_logged_out">You have been signed out of Trakt. Please reconnect.</string>
     <string name="error_generic">An error occurred</string>
     <string name="crash_report_prompt_title">The previous session stopped unexpectedly</string>
-    <string name="crash_report_prompt_subtitle">You can open a prefilled GitHub issue to help improve this test build.</string>
-    <string name="crash_report_prompt_privacy">The report is stored only on this device and sensitive values were redacted where possible.</string>
-    <string name="crash_report_prompt_open">Open GitHub issue</string>
+    <string name="crash_report_prompt_subtitle">Review the retained, sanitized report on your phone before opening GitHub.</string>
+    <string name="crash_report_prompt_privacy">Reports stay encrypted on this device until you explicitly discard them. Nothing is uploaded automatically.</string>
+    <string name="crash_report_prompt_open">Review on phone</string>
     <string name="crash_report_prompt_dismiss">Not now</string>
 
     <string name="action_retry">Retry</string>
@@ -1737,6 +1737,8 @@
     <string name="player_report_issue_sent">Report sent: %1$s</string>
     <string name="player_report_issue_sent_button">Report Sent</string>
     <string name="player_report_issue_failed">Unable to send report</string>
+    <string name="player_report_issue_saved">Report saved locally. Open phone review to share it.</string>
+    <string name="player_report_issue_open_phone_review">Open phone review</string>
     <string name="player_report_loading_issue">Report Loading Issue</string>
     <plurals name="player_report_loading_issue_prompt">
         <item quantity="one">Still loading after %1$d second</item>

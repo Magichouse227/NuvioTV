@@ -39,15 +39,29 @@ internal fun PlayerRuntimeController.attemptStartupRecovery(
     }
     if (hasRenderedFirstFrame) return false
     if (!isRetryablePlaybackError(error)) return false
-    if (startupRetryCount >= MAX_STARTUP_AUTO_RETRIES) return false
+
+    val savedPosition = reliableRecoveryPosition()
+    if (!PlayerRuntimeErrorRecoveryPolicy.shouldRetry(
+            PlayerRuntimeErrorRecoveryPolicy.RetryInput(
+                retryCount = startupRetryCount,
+                maxRetries = MAX_STARTUP_AUTO_RETRIES,
+                reliablePositionMs = savedPosition,
+                failedPositionMs = errorRecoveryFailurePositionMs
+            )
+        )
+    ) {
+        return false
+    }
 
     val paused = userPausedManually
     val attempt = startupRetryCount
     startupRetryCount++
+    errorRecoveryFailurePositionMs = savedPosition ?: 0L
 
     Log.w(
         PlayerRuntimeController.TAG,
-        "Startup recovery ${attempt + 1}/$MAX_STARTUP_AUTO_RETRIES after ${RETRY_DELAY_MS}ms for: $detailedError"
+        "Startup recovery ${attempt + 1}/$MAX_STARTUP_AUTO_RETRIES after ${RETRY_DELAY_MS}ms " +
+            "at position=${savedPosition ?: 0L}ms for: $detailedError"
     )
 
     errorRetryJob?.cancel()
@@ -65,6 +79,9 @@ internal fun PlayerRuntimeController.attemptStartupRecovery(
         delay(RETRY_DELAY_MS)
 
         releasePlayer(flushPlaybackState = false)
+        if (savedPosition != null) {
+            _uiState.update { it.copy(pendingSeekPosition = savedPosition) }
+        }
         initializePlayer(currentStreamUrl, currentHeaders, startPaused = paused)
     }
     return true
@@ -73,11 +90,13 @@ internal fun PlayerRuntimeController.attemptStartupRecovery(
 /**
  * Determines whether the given [PlaybackException] is transient and worth retrying.
  *
- * Retryable errors include source/IO errors, parsing glitches, and unexpected runtime
- * exceptions that commonly occur after pause/resume or seek on flaky streams.
- * Decoder-init and DRM errors are considered fatal.
+ * Retryable errors include source/IO errors, recoverable parsing glitches, and unexpected runtime
+ * exceptions that commonly occur after pause/resume or seek on flaky streams. Known malformed
+ * containers and explicit unsupported formats are considered fatal.
  */
 internal fun isRetryablePlaybackError(error: PlaybackException): Boolean {
+    if (error.isKnownNonRetryableRecoveryError()) return false
+
     return when (error.errorCode) {
         // --- Source / IO errors (the 2xxx range) ---
         PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
@@ -149,6 +168,60 @@ internal fun PlaybackException.findInvalidResponseCodeException(): HttpDataSourc
         current = current.cause
     }
     return null
+}
+
+/**
+ * Malformed Matroska/EBML and explicit unsupported-format failures are deterministic for the
+ * selected source. Retrying the same bytes or silently switching engines only repeats the same
+ * failure, so these are allowed to fall through to the normal fatal-error presentation.
+ */
+internal fun PlaybackException.isKnownNonRetryableRecoveryError(
+    additionalMessage: String? = null
+): Boolean {
+    val unsupportedFormatErrorCode =
+        errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ||
+            errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+    val malformedContainerErrorCode =
+        errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED
+    return recoveryErrorClassification(
+        additionalMessages = listOfNotNull(additionalMessage),
+        hasUnsupportedFormatErrorCode = unsupportedFormatErrorCode,
+        hasMalformedContainerErrorCode = malformedContainerErrorCode
+    ) != PlayerRuntimeErrorRecoveryPolicy.ErrorClassification.Retryable
+}
+
+internal fun isKnownNonRetryableRecoveryMessage(message: String?): Boolean {
+    if (message.isNullOrBlank()) return false
+    return PlayerRuntimeErrorRecoveryPolicy.classify(
+        messages = listOf(message)
+    ) != PlayerRuntimeErrorRecoveryPolicy.ErrorClassification.Retryable
+}
+
+private fun PlaybackException.recoveryErrorClassification(
+    additionalMessages: Iterable<String> = emptyList(),
+    hasUnsupportedFormatErrorCode: Boolean =
+        errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ||
+            errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+    hasMalformedContainerErrorCode: Boolean =
+        errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED
+): PlayerRuntimeErrorRecoveryPolicy.ErrorClassification {
+    return PlayerRuntimeErrorRecoveryPolicy.classify(
+        messages = recoveryErrorMessages() + additionalMessages,
+        hasUnsupportedFormatErrorCode = hasUnsupportedFormatErrorCode,
+        hasMalformedContainerErrorCode = hasMalformedContainerErrorCode
+    )
+}
+
+private fun PlaybackException.recoveryErrorMessages(): List<String> {
+    val messages = buildList {
+        var current: Throwable? = this@recoveryErrorMessages
+        while (current != null) {
+            current.message?.let(::add)
+            add(current.toString())
+            current = current.cause
+        }
+    }
+    return messages
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
@@ -237,6 +310,22 @@ private fun Throwable.findMostRelevantCauseMessage(): String? {
 }
 
 /**
+ * ExoPlayer can reset its reported position to zero while dispatching an error even though the
+ * controller timeline still contains the last useful playhead. Capture that timeline before any
+ * release/prepare call so recovery never silently starts from the beginning.
+ */
+internal fun PlayerRuntimeController.reliableRecoveryPosition(
+    currentPositionMs: Long? = currentPlaybackPositionMs()
+): Long? {
+    return PlayerRuntimeErrorRecoveryPolicy.reliablePositionMs(
+        currentPositionMs = currentPositionMs,
+        timelinePositionMs = playbackTimeline.value.currentPosition,
+        savedPositionMs = lastSavedPosition,
+        pendingSeekPositionMs = _uiState.value.pendingSeekPosition
+    )
+}
+
+/**
  * Attempts an automatic retry of the current stream, preserving the playback position.
  *
  * The first retry re-prepares the current player, and the second retry fully rebuilds it,
@@ -255,19 +344,40 @@ internal fun PlayerRuntimeController.attemptAutoRetry(
         return false
     }
     if (!isRetryablePlaybackError(error)) return false
-    if (errorRetryCount >= MAX_AUTO_RETRIES) return false
+    if (error.isKnownNonRetryableRecoveryError(additionalMessage = detailedError)) return false
+
+    val savedPosition = reliableRecoveryPosition()
+    if (!PlayerRuntimeErrorRecoveryPolicy.shouldRetry(
+            PlayerRuntimeErrorRecoveryPolicy.RetryInput(
+                retryCount = errorRetryCount,
+                maxRetries = MAX_AUTO_RETRIES,
+                reliablePositionMs = savedPosition,
+                failedPositionMs = errorRecoveryFailurePositionMs
+            )
+        )
+    ) {
+        Log.w(
+            PlayerRuntimeController.TAG,
+            "Auto-retry suppressed: playhead did not move beyond " +
+                "${errorRecoveryFailurePositionMs ?: 0L}ms " +
+                "(current=${savedPosition ?: 0L}ms)"
+        )
+        return false
+    }
 
     val paused = userPausedManually
     val attempt = errorRetryCount
     errorRetryCount++
+    errorRecoveryFailurePositionMs = savedPosition ?: 0L
 
     Log.w(
         PlayerRuntimeController.TAG,
-        "Auto-retry ${attempt + 1}/$MAX_AUTO_RETRIES after ${RETRY_DELAY_MS}ms for: $detailedError"
+        "Auto-retry ${attempt + 1}/$MAX_AUTO_RETRIES after ${RETRY_DELAY_MS}ms " +
+            "at position=${savedPosition ?: 0L}ms for: $detailedError"
     )
 
     // Capture the current position so we can resume after re-init.
-    val savedPosition = _exoPlayer?.currentPosition?.takeIf { it > 0L } ?: 0L
+    val savedPositionMs = savedPosition ?: 0L
     val isFirstAttempt = attempt == 0
 
     errorRetryJob?.cancel()
@@ -286,24 +396,24 @@ internal fun PlayerRuntimeController.attemptAutoRetry(
             // Lightweight recovery: re-prepare the same source without destroying the player.
             val player = _exoPlayer
             if (player != null) {
-                if (savedPosition > 0L) {
-                    player.seekTo((savedPosition - 1).coerceAtLeast(0L))
+                if (savedPositionMs > 0L) {
+                    player.seekTo((savedPositionMs - 1).coerceAtLeast(0L))
                 }
                 player.prepare()
                 // Only resume playback if the user hadn't paused.
                 player.playWhenReady = !paused
             } else {
                 releasePlayer(flushPlaybackState = false)
-                if (savedPosition > 0L) {
-                    _uiState.update { it.copy(pendingSeekPosition = savedPosition) }
+                if (savedPositionMs > 0L) {
+                    _uiState.update { it.copy(pendingSeekPosition = savedPositionMs) }
                 }
                 initializePlayer(currentStreamUrl, currentHeaders, startPaused = paused)
             }
         } else {
             // Full teardown — clears any corrupt decoder/internal state.
             releasePlayer(flushPlaybackState = false)
-            if (savedPosition > 0L) {
-                _uiState.update { it.copy(pendingSeekPosition = savedPosition) }
+            if (savedPositionMs > 0L) {
+                _uiState.update { it.copy(pendingSeekPosition = savedPositionMs) }
             }
             initializePlayer(currentStreamUrl, currentHeaders, startPaused = paused)
         }
@@ -318,6 +428,7 @@ internal fun PlayerRuntimeController.attemptAutoRetry(
 internal fun PlayerRuntimeController.resetErrorRetryState() {
     startupRetryCount = 0
     errorRetryCount = 0
+    errorRecoveryFailurePositionMs = null
     parsingErrorProbeAttempted = false
     pendingAudioPcmFallbackRebuild = false
     errorRetryJob?.cancel()
@@ -329,7 +440,12 @@ internal fun PlayerRuntimeController.scheduleStableProgressReset() {
     stableProgressResetJob = scope.launch {
         delay(STABLE_PROGRESS_RESET_DELAY_MS)
         val player = _exoPlayer ?: return@launch
-        if (player.playbackState == Player.STATE_READY && player.isPlaying) {
+        val position = reliableRecoveryPosition(currentPositionMs = player.currentPosition)
+        val progressed = PlayerRuntimeErrorRecoveryPolicy.hasMeaningfulForwardProgress(
+            currentPositionMs = position,
+            failedPositionMs = errorRecoveryFailurePositionMs
+        )
+        if (player.playbackState == Player.STATE_READY && player.isPlaying && progressed) {
             resetErrorRetryState()
         }
     }
@@ -379,7 +495,7 @@ internal fun PlayerRuntimeController.tryAudioTrackPcmFallback(
     pendingAudioPcmFallbackRebuild = true
 
     val player = _exoPlayer ?: return false
-    val savedPosition = player.currentPosition.takeIf { it > 0L } ?: 0L
+    val savedPosition = reliableRecoveryPosition(player.currentPosition) ?: 0L
     val paused = userPausedManually
 
     Log.d(PlayerRuntimeController.TAG, "Audio track init failed (5001) — rebuilding player with PCM forcing, position=${savedPosition}ms")
@@ -414,6 +530,7 @@ internal fun PlayerRuntimeController.tryDv7HevcFallback(
     error: PlaybackException
 ): Boolean {
     if (error.errorCode != PlaybackException.ERROR_CODE_DECODER_INIT_FAILED) return false
+    if (error.isKnownNonRetryableRecoveryError()) return false
     if (hasTriedDv7HevcFallback) return false
     if (cachedDecoderPriority != 1) return false
     // Skip if DV7-to-HEVC is already active — nothing more we can do.
@@ -423,7 +540,7 @@ internal fun PlayerRuntimeController.tryDv7HevcFallback(
     forceDv7ToHevc = true
 
     val paused = userPausedManually
-    val savedPosition = _exoPlayer?.currentPosition?.takeIf { it > 0L } ?: 0L
+    val savedPosition = reliableRecoveryPosition() ?: 0L
 
     Log.d(
         PlayerRuntimeController.TAG,
@@ -467,8 +584,17 @@ internal fun PlayerRuntimeController.tryParsingErrorProbeFallback(
         error.cause?.toString()?.contains("UnrecognizedInputFormatException") == true
 
     if (!isSourceOrParsingError) return false
+    if (error.isKnownNonRetryableRecoveryError(additionalMessage = detailedError)) {
+        // Do not probe/rebuild known-corrupt Matroska bytes. Let the caller's fatal path show the
+        // actual parser message instead of turning a deterministic source error into a retry loop.
+        return false
+    }
     if (parsingErrorProbeAttempted) return false
     parsingErrorProbeAttempted = true
+
+    val reliableSavedPosition = reliableRecoveryPosition(
+        currentPositionMs = savedPosition.takeIf { it > 0L }
+    )
 
     val previousMimeType = currentStreamMimeType
     Log.w(
@@ -492,17 +618,21 @@ internal fun PlayerRuntimeController.tryParsingErrorProbeFallback(
             )
             currentStreamMimeType = probedMime
             currentStreamResponseHeaders = emptyMap()
+            errorRetryCount = maxOf(errorRetryCount, 1)
+            errorRecoveryFailurePositionMs = reliableSavedPosition ?: 0L
             releasePlayer(flushPlaybackState = false)
-            if (savedPosition > 0L) {
-                _uiState.update { it.copy(pendingSeekPosition = savedPosition) }
+            if (reliableSavedPosition != null) {
+                _uiState.update { it.copy(pendingSeekPosition = reliableSavedPosition) }
             }
             initializePlayer(currentStreamUrl, currentHeaders, startPaused = paused)
         } else if (previousMimeType == androidx.media3.common.MimeTypes.APPLICATION_M3U8) {
             currentStreamMimeType = null
             currentStreamResponseHeaders = emptyMap()
+            errorRetryCount = maxOf(errorRetryCount, 1)
+            errorRecoveryFailurePositionMs = reliableSavedPosition ?: 0L
             releasePlayer(flushPlaybackState = false)
-            if (savedPosition > 0L) {
-                _uiState.update { it.copy(pendingSeekPosition = savedPosition) }
+            if (reliableSavedPosition != null) {
+                _uiState.update { it.copy(pendingSeekPosition = reliableSavedPosition) }
             }
             initializePlayer(currentStreamUrl, currentHeaders, startPaused = paused)
         } else {

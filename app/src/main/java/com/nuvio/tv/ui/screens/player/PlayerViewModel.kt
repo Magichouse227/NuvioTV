@@ -92,6 +92,7 @@ class PlayerViewModel @Inject constructor(
     private val cloudPlaybackSessionStore: CloudLibraryPlaybackSessionStore,
     private val streamBadgePresentation: com.nuvio.tv.core.streams.StreamBadgePresentation,
     private val playbackIssueReportRepository: com.nuvio.tv.data.repository.PlaybackIssueReportRepository,
+    private val diagnosticShareController: com.nuvio.tv.core.diagnostics.DiagnosticShareController,
     private val externalPlaybackTracker: com.nuvio.tv.core.player.ExternalPlaybackTracker,
     private val subtitleFileCache: com.nuvio.tv.core.player.SubtitleFileCache,
     private val tvRecommendationManager: com.nuvio.tv.core.recommendations.TvRecommendationManager,
@@ -179,6 +180,13 @@ class PlayerViewModel @Inject constructor(
     val effectiveAutoplayEnabled = playerSettingsDataStore.playerSettings
         .map(StreamAutoPlayPolicy::isEffectivelyEnabled)
         .distinctUntilChanged()
+
+    suspend fun openSavedDiagnosticReport(reportId: String): Result<com.nuvio.tv.core.diagnostics.DiagnosticShareLink> =
+        diagnosticShareController.open(reportId)
+
+    fun closeSavedDiagnosticReportShare() {
+        diagnosticShareController.close()
+    }
 
     val exoPlayer: ExoPlayer?
         get() = controller.exoPlayer

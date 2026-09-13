@@ -148,18 +148,18 @@ func TestNormalizeLeavesUnreliableNumberingAlone(t *testing.T) {
 	}
 }
 
-func TestNormalizeLargeGapCountedNotFilled(t *testing.T) {
-	missingNums := make([]int, 0, MaxZeroFills+2)
-	for num := 2; num < MaxZeroFills+4; num++ {
+func TestNormalizeLargeGapPreservesDeclaredLayout(t *testing.T) {
+	missingNums := make([]int, 0, 12)
+	for num := 2; num < 14; num++ {
 		missingNums = append(missingNums, num)
 	}
 	in := gappedNZBSegments(30, 1024, missingNums...)
 	out, missing := normalizeNZBSegments("test.mkv", in)
-	if missing != MaxZeroFills+2 {
-		t.Fatalf("missing = %d, want %d", missing, MaxZeroFills+2)
+	if missing != 0 {
+		t.Fatalf("unmaterialized missing = %d, want 0", missing)
 	}
-	if len(out) != len(in) {
-		t.Fatalf("a gap past the zero-fill budget must not be materialized, got %d segments", len(out))
+	if len(out) != 30 {
+		t.Fatalf("gapped layout has %d segments, want declared 30", len(out))
 	}
 }
 
@@ -176,8 +176,8 @@ func TestNewFileCountsMissingFromNZB(t *testing.T) {
 		t.Fatalf("SegmentCount() = %d, want the declared 12", got)
 	}
 
-	missingNums := make([]int, 0, MaxZeroFills+2)
-	for num := 2; num < MaxZeroFills+4; num++ {
+	missingNums := make([]int, 0, 12)
+	for num := 2; num < 14; num++ {
 		missingNums = append(missingNums, num)
 	}
 	large := NewFile(context.Background(), &nzb.File{
@@ -185,22 +185,24 @@ func TestNewFileCountsMissingFromNZB(t *testing.T) {
 		Groups:   []string{"alt.test"},
 		Segments: gappedNZBSegments(30, 1024, missingNums...),
 	}, nil, nil)
-	if got := large.MissingFromNZB(); got != MaxZeroFills+2 {
-		t.Fatalf("MissingFromNZB() = %d, want %d", got, MaxZeroFills+2)
+	if got := large.MissingFromNZB(); got != 12 {
+		t.Fatalf("MissingFromNZB() = %d, want %d", got, 12)
 	}
 }
 
 // The regression this package comment describes: articles missing from the NZB
-// itself must read back as zero-filled holes at their declared offsets, not
-// silently shift every byte after the gap.
-func TestNZBGapPlaceholdersZeroFillDuringPlayback(t *testing.T) {
+// itself must stop playback at their declared offsets, not silently shift
+// every byte after the gap or synthesize a zero-filled media range.
+func TestNZBGapPlaceholdersFailDuringPlayback(t *testing.T) {
 	const segments, segmentSize = 12, 1024
 	fetcher := newDamagedSegmentFetcher(segmentSize)
+	estimator := NewSegmentSizeEstimator()
+	estimator.Set(segmentSize, segmentSize)
 	f := NewFile(context.Background(), &nzb.File{
 		Subject:  "test.mkv",
 		Groups:   []string{"alt.test"},
 		Segments: gappedNZBSegments(segments, segmentSize, 4, 8),
-	}, nil, fetcher)
+	}, estimator, fetcher)
 
 	stream, err := f.OpenStreamCtx(playbackCtx())
 	if err != nil {
@@ -209,23 +211,20 @@ func TestNZBGapPlaceholdersZeroFillDuringPlayback(t *testing.T) {
 	defer stream.Close()
 
 	got, err := io.ReadAll(stream)
-	if err != nil {
-		t.Fatalf("reading a release with two NZB gaps must succeed, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "article missing from NZB") {
+		t.Fatalf("reading a release with an NZB gap must fail clearly, got: %v", err)
 	}
-	if len(got) != segments*segmentSize {
-		t.Fatalf("read %d bytes, want the declared %d", len(got), segments*segmentSize)
+	if len(got) != 3*segmentSize {
+		t.Fatalf("read %d bytes, want prefix before first declared gap", len(got))
 	}
-	for i := 0; i < segments; i++ {
+	for i := 0; i < 3; i++ {
 		want := segmentPayload(i, segmentSize)
-		if i == 3 || i == 7 {
-			want = make([]byte, segmentSize)
-		}
 		if !bytes.Equal(got[i*segmentSize:(i+1)*segmentSize], want) {
 			t.Fatalf("segment %d did not read back at its declared offset", i)
 		}
 	}
-	if holes := f.ZeroFilledSegments(); holes != 2 {
-		t.Fatalf("zero-filled segments = %d, want 2", holes)
+	if !f.IsFailed() {
+		t.Fatal("a declared NZB gap must mark the source unavailable")
 	}
 }
 

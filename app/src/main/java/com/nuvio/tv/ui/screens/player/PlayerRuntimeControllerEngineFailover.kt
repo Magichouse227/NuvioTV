@@ -13,6 +13,7 @@ internal fun PlayerRuntimeController.maybeAutoSwitchInternalPlayerOnStartupError
     allowEngineFailover: Boolean
 ): Boolean {
     if (!allowEngineFailover) return false
+    if (isKnownNonRetryableRecoveryMessage(detailedError)) return false
     if (!autoSwitchInternalPlayerOnErrorEnabled) return false
     if (startupEngineFailoverTriggered) return false
     if (!isStartupPhaseForEngineFailover()) return false

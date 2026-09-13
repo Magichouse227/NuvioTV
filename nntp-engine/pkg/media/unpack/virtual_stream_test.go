@@ -70,6 +70,33 @@ func TestVirtualStreamReadsAcrossPartBoundaries(t *testing.T) {
 	}
 }
 
+func TestVirtualStreamReportsShortPartInsteadOfSkippingToNextVolume(t *testing.T) {
+	stream := NewVirtualStream(context.Background(), []virtualPart{
+		// This part declares five bytes, but its backing volume ends after
+		// three. The following part must never be spliced over that gap.
+		{VirtualStart: 0, VirtualEnd: 5, VolFile: &memoryUnpackableFile{name: "part1", data: []byte("abc")}},
+		{VirtualStart: 5, VirtualEnd: 8, VolFile: &memoryUnpackableFile{name: "part2", data: []byte("def")}},
+	}, 8, 0)
+	defer stream.Close()
+
+	buf := make([]byte, 8)
+	n, err := stream.Read(buf)
+	if n != 3 {
+		t.Fatalf("Read copied %d bytes, want available prefix 3", n)
+	}
+	if err != nil {
+		t.Fatalf("first Read error = %v, want available prefix without an error", err)
+	}
+	if got := string(buf[:n]); got != "abc" {
+		t.Fatalf("Read prefix = %q, want %q", got, "abc")
+	}
+
+	n, err = stream.Read(buf)
+	if n != 0 || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("second Read = (%d, %v), want (0, io.ErrUnexpectedEOF)", n, err)
+	}
+}
+
 func TestVirtualStreamSeekNearEOFReturnsRemainingBytesThenEOF(t *testing.T) {
 	stream := NewVirtualStream(context.Background(), []virtualPart{
 		{VirtualStart: 0, VirtualEnd: 3, VolFile: &memoryUnpackableFile{name: "part1", data: []byte("abc")}},

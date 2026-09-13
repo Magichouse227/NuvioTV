@@ -65,18 +65,37 @@ GPL-3.0 with the BSD notice retained.
 
 Android builds package this file and both complete license texts under the
 APK's `assets/licenses/` directory. The corresponding source is this repository,
-including the pinned module versions and the build recipe below.
+including the pinned module versions and the build recipes below. The Gradle
+`buildNntpEngine` task runs the focused loader, unpack, and command tests before
+building, and uses the Android Components SDK provider for the configured NDK.
+It is an input/output-aware task, but its toolchain check always runs so a
+missing Go installation cannot silently leave checked-in binaries in an APK.
 
 ## Rebuilding the Android binaries
 
 The checked-in binaries were built with Go 1.25.6, Android NDK 29.0.14206865,
-and Android API level 24. From the repository root on Windows, run:
+and Android API level 24. From `native/nuvio-tv`, on Linux or macOS, set
+`ANDROID_NDK_HOME` to that NDK and run:
+
+```bash
+ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/29.0.14206865" \
+  ./nntp-engine/build-android.sh
+```
+
+On Windows, run:
 
 ```powershell
 .\nntp-engine\build-android.ps1 -NdkHome "$env:LOCALAPPDATA\Android\Sdk\ndk\29.0.14206865"
 ```
 
 This rebuilds `libnuvionntp.so` for `arm64-v8a`, `armeabi-v7a`, `x86`, and
-`x86_64`. Update the base commit and backport list, copied source, `go.mod`,
+`x86_64`. Both scripts run:
+
+```text
+go test ./pkg/media/loader ./pkg/media/unpack ./cmd/nuvio-nntp
+```
+
+before compiling four `-buildmode=pie` executables with the API 24 NDK
+compilers. Update the base commit and backport list, copied source, `go.mod`,
 `go.sum`, this modification notice, toolchain versions, and Android binaries
 together.

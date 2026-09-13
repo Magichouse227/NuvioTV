@@ -139,6 +139,10 @@ import com.nuvio.tv.core.auth.DeviceSessionRegistration
 import com.nuvio.tv.core.deeplink.DeepLinkHandler
 import com.nuvio.tv.core.deeplink.DeepLinkParser
 import com.nuvio.tv.core.diagnostics.CrashReportStore
+import com.nuvio.tv.core.diagnostics.DiagnosticReportStore
+import com.nuvio.tv.core.diagnostics.DiagnosticShareController
+import com.nuvio.tv.core.diagnostics.DiagnosticShareLink
+import com.nuvio.tv.core.diagnostics.StoredDiagnosticReport
 import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.core.sync.ProfileSyncService
 import com.nuvio.tv.core.sync.StartupSyncService
@@ -177,6 +181,7 @@ import com.nuvio.tv.ui.navigation.NuvioNavHost
 import com.nuvio.tv.ui.navigation.Screen
 import com.nuvio.tv.ui.membership.LocalMemberAccess
 import com.nuvio.tv.ui.screens.account.AuthQrSignInScreen
+import com.nuvio.tv.ui.screens.player.DiagnosticPhoneReviewDialog
 import com.nuvio.tv.ui.screens.addon.EssentialAddonSetupScreen
 import com.nuvio.tv.ui.screens.profile.ProfileSelectionScreen
 import com.nuvio.tv.ui.theme.NuvioComponents
@@ -206,6 +211,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 val LocalSidebarExpanded = compositionLocalOf { false }
 val LocalContentFocusRequester = compositionLocalOf { FocusRequester.Default }
@@ -315,6 +321,12 @@ open class MainActivity : ComponentActivity() {
     @Inject
     lateinit var crashReportStore: CrashReportStore
 
+    @Inject
+    lateinit var diagnosticReportStore: DiagnosticReportStore
+
+    @Inject
+    lateinit var diagnosticShareController: DiagnosticShareController
+
     private val pendingDeepLinkUrl = MutableStateFlow<String?>(null)
     private val pendingLaunchIntent = MutableStateFlow<Intent?>(null)
 
@@ -399,19 +411,53 @@ open class MainActivity : ComponentActivity() {
             val hasSeenAuthQrOnFirstLaunch by hasSeenAuthQrFlow.collectAsState(initial = null)
             val authState by authManager.authState.collectAsState()
             val context = LocalContext.current
-            var pendingCrashReport by remember { mutableStateOf<String?>(null) }
-            LaunchedEffect(crashReportStore) {
-                pendingCrashReport = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    crashReportStore.read()
+            var pendingCrashReports by remember { mutableStateOf<List<StoredDiagnosticReport>>(emptyList()) }
+            var diagnosticShareLink by remember { mutableStateOf<DiagnosticShareLink?>(null) }
+            val diagnosticScope = rememberCoroutineScope()
+            LaunchedEffect(diagnosticReportStore) {
+                diagnosticReportStore.awaitInitialization()
+                pendingCrashReports = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    crashReportStore.reports().filter {
+                        it.type == "managed_crash" || it.type == "unclean_exit"
+                    }.takeLast(6)
                 }
             }
 
-            if (pendingCrashReport != null) {
+            if (pendingCrashReports.isNotEmpty()) {
                 CrashReportPrompt(
-                    report = pendingCrashReport.orEmpty(),
+                    reports = pendingCrashReports,
+                    onReview = { report ->
+                        diagnosticScope.launch {
+                            diagnosticShareController.open(report.id)
+                                .onSuccess { diagnosticShareLink = it }
+                                .onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "Could not open phone review. Your report remains saved.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        }
+                    },
+                    onDiscard = { report ->
+                        diagnosticScope.launch {
+                            crashReportStore.discard(report.id)
+                            pendingCrashReports = crashReportStore.reports().filter {
+                                it.type == "managed_crash" || it.type == "unclean_exit"
+                            }.takeLast(6)
+                        }
+                    },
                     onDismiss = {
-                        crashReportStore.clear()
-                        pendingCrashReport = null
+                        pendingCrashReports = emptyList()
+                    }
+                )
+            }
+            diagnosticShareLink?.let { link ->
+                DiagnosticPhoneReviewDialog(
+                    link = link,
+                    onDismiss = {
+                        diagnosticShareController.close()
+                        diagnosticShareLink = null
                     }
                 )
             }
@@ -1328,12 +1374,15 @@ open class MainActivity : ComponentActivity() {
         // tracked; onActivityResult keeps it for a completion or dismisses it otherwise.
         externalPlaybackTracker.raiseAutoNextOverlayOnReturn()
         super.onStart()
+        diagnosticReportStore.markAppForeground()
         startupSyncService.startPeriodicSurfacePulls()
         androidTvChannelSyncService.onForegroundChanged(true)
     }
 
     override fun onStop() {
         externalPlaybackTracker.onExternalPlayerCoveredApp()
+        diagnosticShareController.close()
+        diagnosticReportStore.markAppBackground()
         super.onStop()
         startupSyncService.stopPeriodicSurfacePulls()
         // App going to background (e.g. user returning to the launcher): reconcile the
@@ -2392,15 +2441,16 @@ private fun rememberRawSvgPainter(rawIconRes: Int): Painter {
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun CrashReportPrompt(
-    report: String,
+    reports: List<StoredDiagnosticReport>,
+    onReview: (StoredDiagnosticReport) -> Unit,
+    onDiscard: (StoredDiagnosticReport) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
     val openFocusRequester = remember { FocusRequester() }
     NuvioDialog(
         onDismiss = onDismiss,
-        title = stringResource(R.string.crash_report_prompt_title),
-        subtitle = stringResource(R.string.crash_report_prompt_subtitle)
+        title = "Saved crash diagnostics",
+        subtitle = "Choose a saved crash or abnormal-exit report to review. Playback reports are kept separately."
     ) {
         LaunchedEffect(Unit) {
             withFrameNanos { }
@@ -2411,48 +2461,28 @@ private fun CrashReportPrompt(
             color = NuvioTheme.colors.TextSecondary,
             style = androidx.tv.material3.MaterialTheme.typography.bodyMedium
         )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
-        ) {
-            Button(
-                onClick = {
-                    fun issueUri(body: String) = Uri.parse(
-                        "https://github.com/Magichouse227/NuvioTV/issues/new"
-                    ).buildUpon()
-                        .appendQueryParameter("title", "Native test build crash")
-                        .appendQueryParameter("body", body)
-                        .build()
-                    // Bound the encoded URL, not just the unencoded report characters.
-                    var body = report.take(1_500)
-                    var uri = issueUri(body)
-                    while (uri.toString().length > 2_000 && body.isNotEmpty()) {
-                        body = body.dropLast(100.coerceAtMost(body.length))
-                        uri = issueUri(body)
-                    }
-                    runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, uri))
-                    }.onSuccess {
-                        onDismiss()
-                    }.onFailure {
-                        Toast.makeText(
-                            context,
-                            R.string.crash_report_browser_unavailable,
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                },
-                modifier = Modifier.weight(1f).focusRequester(openFocusRequester)
+        reports.asReversed().forEachIndexed { index, report ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
             ) {
-                Text(stringResource(R.string.crash_report_prompt_open))
-            }
-            Button(
-                onClick = onDismiss,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(stringResource(R.string.crash_report_prompt_dismiss))
+                Button(
+                    onClick = { onReview(report) },
+                    modifier = Modifier.weight(1f).then(
+                        if (index == 0) Modifier.focusRequester(openFocusRequester) else Modifier
+                    )
+                ) {
+                    Text("Review ${report.type.replace('_', ' ')}")
+                }
+                Button(
+                    onClick = { onDiscard(report) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Discard")
+                }
             }
         }
+        Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.crash_report_prompt_dismiss)) }
     }
 }
 

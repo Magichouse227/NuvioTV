@@ -705,7 +705,11 @@ internal fun PlayerRuntimeController.retryCurrentStreamFromStartAfter416() {
     if (hasRetriedCurrentStreamAfter416) return
     hasRetriedCurrentStreamAfter416 = true
     pendingResumeProgress = null
-    scheduleDeferredPlayerReinitialize(fromPositionMs = 0L, clearResumeProgress = true)
+    scheduleDeferredPlayerReinitialize(
+        fromPositionMs = 0L,
+        clearResumeProgress = true,
+        preserveReliablePosition = false
+    )
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
@@ -923,16 +927,27 @@ internal fun PlayerRuntimeController.handleVc1PlaybackFailure(errorMessage: Stri
 
 internal fun PlayerRuntimeController.scheduleDeferredPlayerReinitialize(
     fromPositionMs: Long,
-    clearResumeProgress: Boolean = false
+    clearResumeProgress: Boolean = false,
+    preserveReliablePosition: Boolean = true
 ) {
     cancelFirstFrameWatchdog()
     cancelStallWatchdog()
     if (clearResumeProgress) {
         pendingResumeProgress = null
     }
+    val recoveryPosition = if (preserveReliablePosition) {
+        reliableRecoveryPosition(currentPositionMs = fromPositionMs)
+    } else {
+        null
+    }
+    if (preserveReliablePosition) {
+        errorRecoveryFailurePositionMs = recoveryPosition ?: 0L
+    } else {
+        errorRecoveryFailurePositionMs = null
+    }
     _uiState.update {
         it.copy(
-            pendingSeekPosition = if (fromPositionMs > 0L) fromPositionMs else null,
+            pendingSeekPosition = recoveryPosition,
             error = null,
             showLoadingOverlay = it.loadingOverlayEnabled
         )

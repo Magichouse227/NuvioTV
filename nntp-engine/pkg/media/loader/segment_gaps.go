@@ -20,13 +20,9 @@ import (
 // nothing ever marked the slot failed and failover never advanced.
 //
 // normalizeNZBSegments restores the declared layout instead: segments are
-// sorted by number, and small gaps are filled with unfetchable placeholder
-// segments (empty message id) so offsets and the total size stay truthful.
-// Reading a placeholder goes through the same zero-fill policy as a 430 hole.
-// Gaps larger than MaxZeroFills are not materialized — a release missing that
-// much can never stream, and VerifyRequiredArchivesExist fails it before a
-// Content-Length is promised — but they are still counted so that verdict can
-// be reached.
+// sorted by number, and gaps are filled with unfetchable placeholder segments
+// (empty message id) so offsets and the total size stay truthful. Playback
+// rejects a placeholder as unavailable; it must not synthesize bytes for it.
 //
 // The declared part count comes from the numbering itself (the highest segment
 // number), raised by the "(n/total)" tail of a yEnc subject when one is
@@ -60,10 +56,8 @@ func declaredYencPartTotal(subject string) int {
 }
 
 // normalizeNZBSegments returns the segment list in declared order with small
-// gaps filled by placeholders, plus how many declared articles were left
-// unmaterialized (nonzero only for a gap too large to ever play). The input is
-// never mutated; when nothing needs fixing the original slice is returned
-// as-is.
+// gaps filled by placeholders. The input is never mutated; when nothing needs
+// fixing the original slice is returned as-is.
 func normalizeNZBSegments(subject string, segments []nzb.Segment) ([]nzb.Segment, int) {
 	n := len(segments)
 	if n == 0 {
@@ -109,16 +103,6 @@ func normalizeNZBSegments(subject string, segments []nzb.Segment) ([]nzb.Segment
 		return out, 0
 	}
 
-	if missing > MaxZeroFills {
-		// The release can never stream: playback would exhaust the zero-fill
-		// budget. Counting the gap is enough for the pre-flight to fail the
-		// release, and skipping the placeholders keeps a wildly wrong declared
-		// total from driving the allocation.
-		logger.Warn("NZB file is missing more articles than playback can zero-fill",
-			"file", subject, "segments", n, "declared", expected, "missing", missing, "max_zero_fills", MaxZeroFills)
-		return segments, missing
-	}
-
 	byNumber := make(map[int]nzb.Segment, n)
 	for _, s := range segments {
 		byNumber[s.Number] = s
@@ -149,7 +133,7 @@ func normalizeNZBSegments(subject string, segments []nzb.Segment) ([]nzb.Segment
 		}
 		out[i].Bytes = firstBytes
 	}
-	logger.Warn("NZB file is missing articles; holes will be zero-filled at their declared offsets",
+	logger.Warn("NZB file is missing articles; playback will reject the incomplete source",
 		"file", subject, "segments", n, "declared", expected, "missing", missing)
 	return out, 0
 }

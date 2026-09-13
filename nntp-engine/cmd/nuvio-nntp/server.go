@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -177,6 +178,19 @@ func (s *apiServer) handleStream(w http.ResponseWriter, request *http.Request, i
 		writeError(w, http.StatusBadGateway, "failed to prepare NZB media")
 		return
 	}
+	serveMediaStream(w, request, name, stream)
+}
+
+// serveMediaStream writes a seekable media stream with HTTP range support.
+// http.ServeContent commits the response status and Content-Length before it
+// starts reading. A later source error can only terminate that already-started
+// response; attempting to write a JSON/non-2xx error then would corrupt the
+// media body and cannot change the status seen by the client.
+func serveMediaStream(w http.ResponseWriter, request *http.Request, name string, stream interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}) {
 	defer stream.Close()
 
 	if contentType := mime.TypeByExtension(filepath.Ext(name)); contentType != "" {

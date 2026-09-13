@@ -3,8 +3,9 @@ package com.nuvio.tv.data.repository
 import android.net.Uri
 import android.os.Build
 import com.nuvio.tv.BuildConfig
+import com.nuvio.tv.core.diagnostics.DiagnosticLog
+import com.nuvio.tv.core.diagnostics.DiagnosticReportStore
 import com.nuvio.tv.core.player.LastPlaybackDiagnostics
-import com.nuvio.tv.data.remote.api.PlaybackIssueReportApi
 import com.nuvio.tv.data.remote.dto.PlaybackIssueAppDto
 import com.nuvio.tv.data.remote.dto.PlaybackIssueContentDto
 import com.nuvio.tv.data.remote.dto.PlaybackIssueDeviceDto
@@ -189,21 +190,59 @@ data class PlaybackIssuePlaybackSettingsInput(
 
 @Singleton
 class PlaybackIssueReportRepository @Inject constructor(
-    private val playbackIssueReportApi: PlaybackIssueReportApi
+    private val reportStore: DiagnosticReportStore
 ) {
     suspend fun submit(input: PlaybackIssueReportInput): Result<String> = runCatching {
-        if (BuildConfig.PLAYBACK_REPORTS_BASE_URL.isBlank()) {
-            error("Playback report endpoint is not configured")
+        val error = input.error
+        val summary = listOfNotNull(
+            error.exceptionClass?.takeIf { it.isNotBlank() },
+            error.errorCodeName?.takeIf { it.isNotBlank() },
+            input.loading.reportReason.takeIf { it.isNotBlank() }
+        ).joinToString(" / ").ifBlank { "Playback or loading issue" }
+        val safeState = buildList {
+            // This walks the existing DTO schema rather than a second, drifting report model.
+            // It exports every numeric/boolean field and only explicitly named enum/format
+            // strings; identifiers, messages, URLs, headers, raw events, and maps are omitted.
+            addAll(input.toDto().allowlistedDiagnosticLines())
+            add("player.engine=${input.playerEngine}")
+            add("player.positionMs=${input.positionMs ?: -1} durationMs=${input.durationMs ?: -1} bufferedPositionMs=${input.bufferedPositionMs ?: -1}")
+            add("loading.phase=${input.loading.phase} elapsedMs=${input.loading.elapsedMs} phaseElapsedMs=${input.loading.phaseElapsedMs} firstFrame=${input.loading.hasRenderedFirstFrame} exoCreated=${input.loading.exoPlayerCreated} exoState=${input.loading.exoPlaybackState} exoLoading=${input.loading.exoIsLoading} mpvAttached=${input.loading.mpvAttached}")
+            add("loading.retries startup=${input.loading.startupRetryCount} error=${input.loading.errorRetryCount} timeout=${input.loading.timeoutRecoveryAttempts}")
+            add("error.class=${error.exceptionClass.orEmpty()} causeClass=${error.causeClass.orEmpty()} code=${error.errorCodeName.orEmpty()} httpStatus=${error.httpStatus ?: -1}")
+            add("diagnostics.video=${input.diagnostics.videoResolution.orEmpty()} codec=${input.diagnostics.videoCodec.orEmpty()} hdr=${input.diagnostics.videoHdrType.orEmpty()} rebufferCount=${input.diagnostics.rebufferCount} rebufferTotalMs=${input.diagnostics.rebufferTotalMs} firstFrameMs=${input.diagnostics.firstFrameMs}")
+            input.playbackSettings?.let { settings ->
+                add("settings.engine=${settings.resolvedInternalPlayerEngine} preference=${settings.playerPreference} decoder=${settings.effectiveDecoderPriorityName} tunneling=${settings.tunnelingEffective} downmix=${settings.downmixEnabled} libass=${settings.activePlayerUsesLibass} frameRate=${settings.frameRateMatchingMode} resolutionMatching=${settings.resolutionMatchingEnabled}")
+                add("settings.buffer min=${settings.minBufferMs} max=${settings.maxBufferMs} playback=${settings.bufferForPlaybackMs} rebuffer=${settings.bufferForPlaybackAfterRebufferMs} targetMb=${settings.targetBufferSizeMb} backBuffer=${settings.effectiveBackBufferDurationMs} parallel=${settings.parallelNetworkEnabled}/${settings.parallelConnectionCount} http2=${settings.enableHttp2}")
+                add("settings.dv dv5to81=${settings.dv5ToDv81Enabled} dv7mode=${settings.dv7HandlingMode} stripHdr10Plus=${settings.stripHdr10PlusSei} hwdecode=${settings.mpvHardwareDecodeMode} aspect=${settings.aspectMode}")
+            }
+            input.playbackAnalytics?.let { analytics ->
+                add("analytics.state=${analytics.playbackStateName.orEmpty()} loading=${analytics.isLoading} playing=${analytics.isPlaying} positionMs=${analytics.positionMs} durationMs=${analytics.durationMs} bufferedMs=${analytics.bufferedPositionMs} droppedFrames=${analytics.droppedFrames} loadErrors=${analytics.loadErrorCount} bytes=${analytics.totalBytesLoaded} audioUnderruns=${analytics.audioUnderrunCount}")
+                analytics.videoFormat?.let { format ->
+                    add("video_format type=${format.trackType} mime=${format.sampleMimeType} container=${format.containerMimeType} codecs=${format.codecs} width=${format.width} height=${format.height} fps=${format.frameRate} bitrate=${format.bitrate}")
+                }
+                analytics.audioFormat?.let { format ->
+                    add("audio_format type=${format.trackType} mime=${format.sampleMimeType} container=${format.containerMimeType} codecs=${format.codecs} channels=${format.channelCount} sampleRate=${format.sampleRate}")
+                }
+                analytics.events.takeLast(80).forEach { event ->
+                    add("playback_event name=${event.name} elapsedMs=${event.elapsedMs} state=${event.playbackState} positionMs=${event.positionMs} bufferedMs=${event.bufferedPositionMs}")
+                }
+                analytics.healthSnapshots.takeLast(40).forEach { snapshot ->
+                    add("health elapsedMs=${snapshot.elapsedMs} state=${snapshot.playbackState} positionMs=${snapshot.positionMs} bufferedMs=${snapshot.bufferedPositionMs} dropped=${snapshot.droppedFrames} rebuffer=${snapshot.rebufferCount} loadErrors=${snapshot.loadErrorCount}")
+                }
+            }
+            // Do not export event messages/details/raw event lines: those are arbitrary external
+            // strings. This export is a deliberately allowlisted structured diagnostic DTO.
+            addAll(input.loading.events.takeLast(20).map {
+                "loading_event phase=${it.phase} elapsedMs=${it.elapsedMs} progress=${it.progress}"
+            })
         }
-        val response = playbackIssueReportApi.createPlaybackIssueReport(input.toDto())
-        if (!response.isSuccessful) {
-            error("Playback report upload failed: HTTP ${response.code()}")
-        }
-        val body = response.body()
-        val reportId = body?.reportId?.trim()?.takeIf { it.isNotBlank() }
-            ?: body?.id?.trim()?.takeIf { it.isNotBlank() }
-            ?: error("Playback report upload failed: missing report id")
-        reportId
+        val report = reportStore.enqueue(
+            type = "playback_issue",
+            summary = summary,
+            body = reportStore.buildReport("playback_issue", summary, safeState)
+        )
+        DiagnosticLog.record("playback_report", "Saved report id=${report.id.take(12)} type=playback_issue")
+        report.id
     }
 
     private fun PlaybackIssueReportInput.toDto(): PlaybackIssueReportRequestDto {
@@ -663,4 +702,48 @@ class PlaybackIssueReportRepository @Inject constructor(
 
     private fun String.limit(maxLength: Int): String =
         if (length <= maxLength) this else take(maxLength)
+
+    private fun PlaybackIssueReportRequestDto.allowlistedDiagnosticLines(): List<String> {
+        val safeStringFields = setOf(
+            "engine", "playerPreference", "internalPlayerEngine", "resolvedInternalPlayerEngine",
+            "decoderPriorityName", "effectiveDecoderPriorityName", "audioOutputChannels",
+            "libassRenderType", "addonSubtitleStartupMode", "subtitleOrganizationMode",
+            "dv7HandlingMode", "mpvHardwareDecodeMode", "frameRateMatchingMode", "aspectMode",
+            "vodCacheSizeMode", "streamAutoPlayMode", "streamAutoPlaySource",
+            "nextEpisodeThresholdMode", "phase", "reportReason", "exoPlaybackStateName",
+            "errorCodeName", "exceptionClass", "causeClass", "dv7ModeRequested",
+            "dv7ModeEffective", "videoResolution", "videoCodec", "videoHdrType",
+            "playbackStateName", "trackType", "sampleMimeType", "containerMimeType",
+            "codecs", "support", "decoderReuseResult", "dataType", "httpMethod", "name",
+            "playbackState"
+        )
+        val excludedRoots = setOf("content", "stream")
+        val lines = ArrayList<String>()
+
+        fun visit(value: Any?, path: String, fieldName: String) {
+            when (value) {
+                null -> Unit
+                is Number, is Boolean -> lines += "$path=$value"
+                is String -> if (fieldName in safeStringFields) lines += "$path=$value"
+                is Iterable<*> -> value.take(120).forEachIndexed { index, item ->
+                    visit(item, "$path[$index]", fieldName)
+                }
+                is Map<*, *> -> Unit // Event details and header maps can carry arbitrary data.
+                else -> if (value.javaClass.name.startsWith("com.nuvio.tv.data.remote.dto.")) {
+                    value.javaClass.declaredFields
+                        .filterNot { it.isSynthetic || java.lang.reflect.Modifier.isStatic(it.modifiers) }
+                        .forEach { field ->
+                            if (path.isEmpty() && field.name in excludedRoots) return@forEach
+                            runCatching {
+                                field.isAccessible = true
+                                visit(field.get(value), if (path.isEmpty()) field.name else "$path.${field.name}", field.name)
+                            }
+                        }
+                }
+            }
+        }
+
+        visit(this, "", "")
+        return lines.takeLast(900)
+    }
 }

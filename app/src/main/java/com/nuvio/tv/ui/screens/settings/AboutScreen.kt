@@ -25,9 +25,11 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,7 +47,14 @@ import androidx.tv.material3.Text
 import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.R
 import com.nuvio.tv.core.build.AppFeaturePolicy
+import com.nuvio.tv.core.diagnostics.DiagnosticDependencies
+import com.nuvio.tv.core.diagnostics.DiagnosticShareLink
+import com.nuvio.tv.core.diagnostics.StoredDiagnosticReport
+import com.nuvio.tv.ui.screens.player.DiagnosticPhoneReviewDialog
+import com.nuvio.tv.ui.screens.player.SavedDiagnosticReportsDialog
 import com.nuvio.tv.ui.components.MemberBrandWordmark
+import dagger.hilt.android.EntryPointAccessors
+import kotlinx.coroutines.launch
 
 @Composable
 fun AboutScreen(
@@ -54,6 +63,23 @@ fun AboutScreen(
     onBackPress: () -> Unit = {}
 ) {
     BackHandler { onBackPress() }
+    val context = LocalContext.current
+    val diagnostics = remember(context.applicationContext) {
+        EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            DiagnosticDependencies::class.java
+        )
+    }
+    val scope = rememberCoroutineScope()
+    var showSavedReports by remember { mutableStateOf(false) }
+    var reports by remember { mutableStateOf<List<StoredDiagnosticReport>>(emptyList()) }
+    var shareLink by remember { mutableStateOf<DiagnosticShareLink?>(null) }
+    LaunchedEffect(showSavedReports) {
+        if (showSavedReports) {
+            diagnostics.reportStore().awaitInitialization()
+            reports = diagnostics.reportStore().reports()
+        }
+    }
 
     SettingsStandaloneScaffold(
         title = stringResource(R.string.about_title),
@@ -61,8 +87,32 @@ fun AboutScreen(
     ) {
         AboutSettingsContent(
             onNavigateToSupportersContributors = onNavigateToSupportersContributors,
-            onNavigateToLicensesAttributions = onNavigateToLicensesAttributions
+            onNavigateToLicensesAttributions = onNavigateToLicensesAttributions,
+            onShowSavedDiagnostics = { showSavedReports = true }
         )
+    }
+    if (showSavedReports) {
+        SavedDiagnosticReportsDialog(
+            reports = reports,
+            onReview = { report ->
+                scope.launch {
+                    diagnostics.shareController().open(report.id).onSuccess { shareLink = it }
+                }
+            },
+            onDiscard = { report ->
+                scope.launch {
+                    diagnostics.reportStore().discard(report.id)
+                    reports = diagnostics.reportStore().reports()
+                }
+            },
+            onDismiss = { showSavedReports = false }
+        )
+    }
+    shareLink?.let { link ->
+        DiagnosticPhoneReviewDialog(link = link, onDismiss = {
+            diagnostics.shareController().close()
+            shareLink = null
+        })
     }
 }
 
@@ -70,7 +120,8 @@ fun AboutScreen(
 fun AboutSettingsContent(
     onNavigateToSupportersContributors: () -> Unit = {},
     onNavigateToLicensesAttributions: () -> Unit = {},
-    initialFocusRequester: FocusRequester? = null
+    initialFocusRequester: FocusRequester? = null,
+    onShowSavedDiagnostics: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val aboutScrollState = rememberScrollState()
@@ -163,6 +214,13 @@ fun AboutSettingsContent(
                                     )
                                     context.startActivity(intent)
                                 }
+                            )
+
+                            SettingsActionRow(
+                                title = "Saved diagnostic reports",
+                                subtitle = "Open, copy, download, or discard retained playback and crash reports",
+                                trailingIcon = Icons.Default.ChevronRight,
+                                onClick = onShowSavedDiagnostics
                             )
 
                             if (AppFeaturePolicy.supportNuvioEnabled) {

@@ -61,6 +61,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.nuvio.tv.R
+import com.nuvio.tv.core.diagnostics.DiagnosticLog
 import com.nuvio.tv.core.player.DolbyVisionCodecFallback
 import com.nuvio.tv.core.player.DolbyVisionBaseLayerPolicy
 import com.nuvio.tv.core.player.BitrateAwareLoadControl
@@ -156,6 +157,7 @@ internal fun PlayerRuntimeController.initializePlayer(
     startPaused: Boolean = false
 ) {
     if (url.isEmpty()) {
+        DiagnosticLog.record("player_initialization", "Rejected initialization because stream URL was empty")
         _uiState.update { it.copy(error = context.getString(R.string.player_error_no_stream_url), showLoadingOverlay = false) }
         return
     }
@@ -230,6 +232,10 @@ internal fun PlayerRuntimeController.initializePlayer(
                 resolvedAutoPlayerEngine = null
             }
             currentInternalPlayerEngine = effectiveInternalPlayerEngine
+            DiagnosticLog.record(
+                "player_initialization",
+                "Starting player engine=${effectiveInternalPlayerEngine.name} startPaused=$startPaused failoverAllowed=$allowEngineFailover"
+            )
             playbackAnalyticsDiagnostics.setTraceContext(
                 host = url.safeHost(),
                 engine = effectiveInternalPlayerEngine.name
@@ -1391,11 +1397,13 @@ internal fun PlayerRuntimeController.initializePlayer(
                         finishLoadingDiagnostics("first_frame_rendered")
 
                         if (isFirstFrame) {
+                            DiagnosticLog.record("player_state", "First video frame rendered")
                             currentDiagnostics = recordFirstFrameDiagnostics(this@apply, currentDiagnostics, playerSettings)
                         }
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
+                        DiagnosticLog.recordThrowable("media3_player_error", error)
                         if (isReleasingPlayer && error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT) return
                         cancelFirstFrameWatchdog()
                         val detailedError = error.toDisplayMessage(context)
@@ -1851,6 +1859,7 @@ internal fun PlayerRuntimeController.initializePlayer(
                         error: java.io.IOException,
                         wasCanceled: Boolean
                     ) {
+                        DiagnosticLog.recordThrowable("media3_load_error", error)
                         playbackAnalyticsDiagnostics.onLoadError(
                             eventTime = eventTime,
                             loadEventInfo = loadEventInfo,
@@ -1865,6 +1874,7 @@ internal fun PlayerRuntimeController.initializePlayer(
                 fetchAddonSubtitles()
             }
         } catch (e: Exception) {
+            DiagnosticLog.recordThrowable("player_initialization_failure", e)
             if (
                 maybeAutoSwitchInternalPlayerOnStartupError(
                     detailedError = e.message ?: context.getString(com.nuvio.tv.R.string.player_error_initialize_failed),

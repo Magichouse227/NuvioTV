@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -69,81 +70,19 @@ func decodeAndCloseBody(body io.ReadCloser, decodeFn func(io.Reader) (*decode.Fr
 	return decodeFn(body)
 }
 
-// MaxZeroFills is how many DISTINCT segments of one file may be zero-filled
-// before the file is declared unplayable. Counting distinct indices (rather
-// than fetch attempts) is what makes the cap mean "this release has N holes":
-// seeking back and forth across one damaged segment must not burn the budget.
-const MaxZeroFills = 10
-
-// MaxZeroFillRun is the longest run of consecutive missing segments that is
-// still zero-filled. A single absent article is a smeared frame the player
-// rides out; five in a row is several seconds of zeros inside the stream,
-// which most demuxers do not survive. Past this the file is failed so the
-// slot fails over instead of serving a crash. The cumulative cap above is
-// unchanged: this only says that ten holes must not be one hole.
-const MaxZeroFillRun = 4
-
 // slowSegmentFetchThreshold flags segment downloads that took long enough to
 // drain a player's buffer; one Warn per slow segment confirms mid-stream
 // stalls in the field without needing Trace-level logs.
 const slowSegmentFetchThreshold = 10 * time.Second
 
 // isArticleNotFound reports whether err indicates the article is missing (430 No Such Article).
-// Used to fail fast on the first segment instead of zero-filling through many segments.
+// Used to fail fast on the first segment rather than opening an unavailable source.
 func isArticleNotFound(err error) bool {
 	return nntp.IsArticleNotFound(err)
 }
 
 func (f *File) IsFailed() bool {
-	return f.runFailed.Load() || f.ZeroFilledSegments() >= MaxZeroFills
-}
-
-// zeroFilledRunLocked is the length of the maximal run of zero-filled
-// segments containing index. Caller holds zeroFillMu.
-func (f *File) zeroFilledRunLocked(index int) int {
-	run := 1
-	for i := index - 1; i >= 0; i-- {
-		if _, ok := f.zeroFilled[i]; !ok {
-			break
-		}
-		run++
-	}
-	for i := index + 1; i < len(f.segments); i++ {
-		if _, ok := f.zeroFilled[i]; !ok {
-			break
-		}
-		run++
-	}
-	return run
-}
-
-// ZeroFilledSegments reports how many distinct segments of this file have been
-// zero-filled so far.
-func (f *File) ZeroFilledSegments() int {
-	f.zeroFillMu.Lock()
-	defer f.zeroFillMu.Unlock()
-	return len(f.zeroFilled)
-}
-
-// isZeroFilled reports whether index was already zero-filled, so repeat reads
-// of a known hole return zeros straight away instead of re-fetching an article
-// that all providers have already refused.
-func (f *File) isZeroFilled(index int) bool {
-	f.zeroFillMu.Lock()
-	defer f.zeroFillMu.Unlock()
-	_, ok := f.zeroFilled[index]
-	return ok
-}
-
-// zeroSegment builds the filler for a segment index using the segment map as it
-// stands now, so a hole discovered before size detection still reads back at the
-// mapped length afterwards.
-func (f *File) zeroSegment(index int) []byte {
-	size := f.segmentDecodedLen(index)
-	if size < 0 {
-		size = 0
-	}
-	return make([]byte, size)
+	return f.runFailed.Load()
 }
 
 type Segment struct {
@@ -169,12 +108,9 @@ type File struct {
 
 	// missingFromNZB counts articles the NZB itself cannot deliver: numbering
 	// gaps (materialized as placeholders or not) and segments carrying no
-	// message id. missingRunFromNZB is the longest contiguous run of those
-	// among the materialized segments — an NZB gap is one span by nature, so
-	// the count alone cannot say whether ten holes are ten glitches or one
-	// unplayable block. Both immutable after NewFile.
-	missingFromNZB    int
-	missingRunFromNZB int
+	// message id. A playable stream must reject every such gap rather than
+	// manufacturing bytes at its declared offset.
+	missingFromNZB int
 
 	downloadMu        sync.Mutex
 	inflightDownloads map[int]*inflightSegmentDownload
@@ -184,10 +120,8 @@ type File struct {
 	abandonedReadAhead    map[uint64]abandonedReadAheadWindow
 	abandonedReadAheadSeq uint64
 
-	zeroFillMu sync.Mutex
-	zeroFilled map[int]struct{}
-	// runFailed is set once a run of zero-filled segments grows past
-	// MaxZeroFillRun; IsFailed reports it alongside the cumulative cap.
+	// runFailed records a definitive missing article. It lets archive setup
+	// stop promptly after a source-integrity failure without fabricating data.
 	runFailed atomic.Bool
 
 	segmentDetectMu sync.Mutex
@@ -235,33 +169,18 @@ type inflightSegmentDownload struct {
 	waiters       int
 }
 
-type zeroFillEligibleError struct {
-	cause error
-}
-
-func (e *zeroFillEligibleError) Error() string { return e.cause.Error() }
-
-func (e *zeroFillEligibleError) Unwrap() error { return e.cause }
-
 func NewFile(ctx context.Context, f *nzb.File, estimator *SegmentSizeEstimator, fetcher SegmentFetcher) *File {
 	nzbSegments, unmaterialized := normalizeNZBSegments(f.Subject, f.Segments)
 	segments := make([]*Segment, len(nzbSegments))
 	var offset int64
 	// Unmaterialized gaps plus every segment without a message id — gap
 	// placeholders and id-less originals alike — can never be fetched from any
-	// provider; the count is what lets the pre-flight refuse a release that
-	// would exhaust the zero-fill budget.
+	// provider; the count lets pre-flight reject an incomplete release before
+	// a response advertises a playable media length.
 	missing := unmaterialized
-	run, longestRun := 0, 0
 	for i, s := range nzbSegments {
 		if strings.TrimSpace(s.ID) == "" {
 			missing++
-			run++
-			if run > longestRun {
-				longestRun = run
-			}
-		} else {
-			run = 0
 		}
 		segments[i] = &Segment{
 			Segment:     s,
@@ -277,10 +196,8 @@ func NewFile(ctx context.Context, f *nzb.File, estimator *SegmentSizeEstimator, 
 		segments:          segments,
 		totalSize:         offset,
 		missingFromNZB:    missing,
-		missingRunFromNZB: longestRun,
 		ctx:               ctx,
 		inflightDownloads: make(map[int]*inflightSegmentDownload),
-		zeroFilled:        make(map[int]struct{}),
 	}
 }
 
@@ -343,16 +260,8 @@ func (f *File) SegmentCount() int { return len(f.segments) }
 
 // MissingFromNZB reports how many of this file's declared articles the NZB
 // itself cannot deliver — numbering gaps and segments without a message id.
-// Anything above MaxZeroFills can never stream, which
-// playback.VerifyRequiredArchivesExist turns into a definitive pre-flight
-// verdict instead of letting an incomplete post serve a truncated file.
+// Any non-zero result is a definitive source-integrity failure for playback.
 func (f *File) MissingFromNZB() int { return f.missingFromNZB }
-
-// MissingRunFromNZB is the longest contiguous run of articles the NZB itself
-// cannot deliver. A run past MaxZeroFillRun would be zero-filled into the
-// stream as one block and fail the file on the read that reaches it, so the
-// pre-flight refuses it before the release is offered.
-func (f *File) MissingRunFromNZB() int { return f.missingRunFromNZB }
 
 // CheckFirstSegmentExists returns whether the required segments (start, middle, end) exist on the server via STAT.
 // Used before opening a stream to fail fast when release segments are missing (430).
@@ -437,9 +346,8 @@ func (f *File) CheckFirstSegmentExists(ctx context.Context) (bool, error) {
 				return f.recordFirstStat(false, nil)
 			}
 			// A hole the NZB itself declares (a numbering-gap placeholder or
-			// an id-less segment) has nothing to STAT: the zero-fill policy
-			// owns it at read time, and MissingFromNZB caps how many of these
-			// a file may carry before the pre-flight refuses it outright.
+			// an id-less segment) has nothing to STAT. Callers reject it via
+			// MissingFromNZB before opening a playable stream.
 			continue
 		}
 		msgIDs = append(msgIDs, msgID)
@@ -931,8 +839,9 @@ func (f *File) FindSegmentIndex(offset int64) int {
 	return -1
 }
 
-// DownloadSegment fetches segment index on demand.
-// On all-provider failure, it zero-fills the segment and counts it toward IsFailed().
+// DownloadSegment fetches segment index on demand. Every failed fetch is
+// returned to the caller; media bytes are never synthesized for a missing
+// article.
 func (f *File) DownloadSegment(ctx context.Context, index int) ([]byte, error) {
 	return f.doDownloadSegment(ctx, index, true)
 }
@@ -954,13 +863,6 @@ func (f *File) ReadAheadSegment(ctx context.Context, index int) {
 const maxAbandonedJoinRetries = 2
 
 func (f *File) doDownloadSegment(ctx context.Context, index int, countFailures bool) ([]byte, error) {
-	// A segment already ruled a hole stays a hole: every provider refused it
-	// once, so re-fetching on each pass over the same offset only adds latency
-	// and would double-count the same damage against MaxZeroFills.
-	if index >= 0 && index < len(f.segments) && f.isZeroFilled(index) {
-		return f.zeroSegment(index), nil
-	}
-
 	// Callers wait on a shared in-flight fetch keyed by segment index, but they do
 	// not own the underlying request lifecycle. That shared fetch runs on the file
 	// context so short-lived probe/prefetch/read cancellations do not poison a
@@ -1235,42 +1137,13 @@ func (f *File) finalizeSegmentDownload(index int, data []byte, err error, countF
 	if err == nil {
 		return data, nil
 	}
-
-	var eligible *zeroFillEligibleError
-	if !errors.As(err, &eligible) {
-		return nil, err
-	}
-
-	if !countFailures {
-		return nil, fmt.Errorf("prefetch segment download failed (not counted): %w", eligible.cause)
-	}
-
-	f.zeroFillMu.Lock()
-	_, known := f.zeroFilled[index]
-	count := len(f.zeroFilled)
-	if !known {
-		if count >= MaxZeroFills {
-			f.zeroFillMu.Unlock()
-			return nil, fmt.Errorf("too many failed segments (%d/%d): %w", count+1, MaxZeroFills, errors.Join(ErrTooManyZeroFills, eligible.cause))
-		}
-		f.zeroFilled[index] = struct{}{}
-		count++
-	}
-	run := f.zeroFilledRunLocked(index)
-	f.zeroFillMu.Unlock()
-
-	if run > MaxZeroFillRun {
-		// Isolated holes are a glitch; a run this long is seconds of zeros
-		// inside the stream, and no player rides that out. Fail the file so
-		// the read errors and the slot fails over.
+	if errors.Is(err, ErrSegmentUnavailable) {
 		f.runFailed.Store(true)
-		return nil, fmt.Errorf("missing run of %d segments at %d exceeds %d: %w", run, index, MaxZeroFillRun, errors.Join(ErrTooManyZeroFills, eligible.cause))
 	}
-
-	// Warn, not Debug: every zero-filled segment is wrong bytes served to a
-	// player, and the operator should be able to find that after the fact.
-	logger.Warn("Segment unavailable, zero-filling gap", "file", f.Name(), "index", index, "holes", count, "max", MaxZeroFills, "run", run, "err", eligible.cause)
-	return f.zeroSegment(index), nil
+	if !countFailures {
+		return nil, fmt.Errorf("prefetch segment download failed: %w", err)
+	}
+	return nil, err
 }
 
 func (f *File) doDownloadSegmentViaFetcher(ctx context.Context, index int) ([]byte, error) {
@@ -1278,16 +1151,11 @@ func (f *File) doDownloadSegmentViaFetcher(ctx context.Context, index int) ([]by
 	if strings.TrimSpace(seg.ID) == "" {
 		// The NZB carries no article for this segment — a numbering-gap
 		// placeholder from normalizeNZBSegments, or a segment posted without a
-		// message id. No provider can ever serve it, so the verdict is
-		// immediate and needs no network. The first segment carries the
-		// container header and stays fatal, exactly like a 430 there; past it
-		// the zero-fill policy decides between a rideable glitch and
-		// ErrTooManyZeroFills.
-		if index == 0 {
-			logger.Warn("First segment missing from NZB", "file", f.Name(), "segment", seg.Number)
-			return nil, fmt.Errorf("segment unavailable: article missing from NZB (segment %d)", seg.Number)
-		}
-		return nil, &zeroFillEligibleError{cause: fmt.Errorf("segment unavailable: article missing from NZB (segment %d)", seg.Number)}
+		// message id. No provider can serve it, so fail immediately rather
+		// than inserting zero bytes that corrupt the container.
+		f.runFailed.Store(true)
+		log.Printf("NUVIO_DIAG event=segment_unavailable")
+		return nil, fmt.Errorf("%w: article missing from NZB (segment %d)", ErrSegmentUnavailable, seg.Number)
 	}
 
 	downloadCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -1307,20 +1175,22 @@ func (f *File) doDownloadSegmentViaFetcher(ctx context.Context, index int) ([]by
 		if index == 0 {
 			logger.Warn("First segment fetch failed", "file", f.Name(), "segment", seg.Number, "err", err)
 			// The first segment carries the container/volume header: nothing
-			// downstream can make sense of a zero-filled one, so a miss here
-			// stays a fast, definitive verdict about the release.
+			// downstream can make sense of a missing container header, so a
+			// miss here stays a fast, definitive verdict about the release.
 			if isArticleNotFound(err) {
-				return nil, fmt.Errorf("segment unavailable: %w", err)
+				f.runFailed.Store(true)
+				log.Printf("NUVIO_DIAG event=segment_unavailable")
+				return nil, fmt.Errorf("%w: %w", ErrSegmentUnavailable, err)
 			}
 			return nil, fmt.Errorf("first segment fetch failed: %w", err)
 		}
 		if isArticleNotFound(err) {
-			// An isolated missing article past the header is a hole, not a dead
-			// release. Hand it to the zero-fill policy, which decides between a
-			// glitch the player rides out and ErrTooManyZeroFills once the file
-			// has accumulated more holes than MaxZeroFills allows. The cause is
-			// preserved either way, so the fatal error still reads as a 430.
-			return nil, &zeroFillEligibleError{cause: fmt.Errorf("segment unavailable: %w", err)}
+			// The provider pool has already tried its fallback providers. A
+			// confirmed miss must be returned to playback, not replaced with
+			// bytes that make an otherwise valid range malformed.
+			f.runFailed.Store(true)
+			log.Printf("NUVIO_DIAG event=segment_unavailable")
+			return nil, fmt.Errorf("%w: %w", ErrSegmentUnavailable, err)
 		}
 		if isContextErr(err) || !shouldPersistDownloadedSegment(downloadCtx) {
 			if ctxErr := downloadCtx.Err(); ctxErr != nil {

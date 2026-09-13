@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -151,6 +152,9 @@ func (r *SegmentReader) Read(p []byte) (int, error) {
 			if err == io.EOF && total > 0 {
 				return total, nil
 			}
+			if err != io.EOF {
+				r.logMediaReadError(total)
+			}
 			if total > 0 && err != io.EOF {
 				return total, err
 			}
@@ -256,6 +260,16 @@ func (r *SegmentReader) readInto(p []byte) (int, error) {
 	r.triggerReadAhead(currentSeg)
 
 	return n, nil
+}
+
+// logMediaReadError emits only numeric, allowlisted diagnostics. The native
+// process output crosses an application boundary, so it must never include a
+// provider URL, article ID, filename, or the underlying error text.
+func (r *SegmentReader) logMediaReadError(bytes int) {
+	r.mu.Lock()
+	offset := r.offset
+	r.mu.Unlock()
+	log.Printf("NUVIO_DIAG event=media_read_error offset=%d bytes=%d", offset, bytes)
 }
 
 func (r *SegmentReader) logEOFBeforeVirtualSize() {

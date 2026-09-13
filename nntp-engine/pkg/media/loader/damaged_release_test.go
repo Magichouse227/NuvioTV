@@ -3,7 +3,6 @@ package loader
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/textproto"
@@ -74,10 +73,16 @@ func playbackCtx() context.Context {
 	return WithSkipGapProbing(context.Background(), true)
 }
 
-func TestIsolatedMissingArticlesPlayThroughAsZeroFilledGaps(t *testing.T) {
+func strictDamagedFile(segmentCount, segmentSize int, fetcher SegmentFetcher) *File {
+	estimator := NewSegmentSizeEstimator()
+	estimator.Set(int64(segmentSize), int64(segmentSize))
+	return NewFile(context.Background(), damagedNZBFile(segmentCount, segmentSize), estimator, fetcher)
+}
+
+func TestMissingArticleStopsStreamWithoutSyntheticBytes(t *testing.T) {
 	const segments, segmentSize = 12, 1024
-	fetcher := newDamagedSegmentFetcher(segmentSize, 3, 7)
-	f := NewFile(context.Background(), damagedNZBFile(segments, segmentSize), nil, fetcher)
+	fetcher := newDamagedSegmentFetcher(segmentSize, 3)
+	f := strictDamagedFile(segments, segmentSize, fetcher)
 
 	stream, err := f.OpenStreamCtx(playbackCtx())
 	if err != nil {
@@ -86,82 +91,41 @@ func TestIsolatedMissingArticlesPlayThroughAsZeroFilledGaps(t *testing.T) {
 	defer stream.Close()
 
 	got, err := io.ReadAll(stream)
-	if err != nil {
-		t.Fatalf("reading a release with two holes must succeed, got: %v", err)
-	}
-	if len(got) != segments*segmentSize {
-		t.Fatalf("read %d bytes, want %d", len(got), segments*segmentSize)
-	}
-	for i := 0; i < segments; i++ {
-		want := segmentPayload(i, segmentSize)
-		if i == 3 || i == 7 {
-			want = make([]byte, segmentSize)
-		}
-		if !bytes.Equal(got[i*segmentSize:(i+1)*segmentSize], want) {
-			t.Fatalf("segment %d did not read back as expected", i)
-		}
-	}
-	if holes := f.ZeroFilledSegments(); holes != 2 {
-		t.Fatalf("zero-filled segments = %d, want 2", holes)
-	}
-	if f.IsFailed() {
-		t.Fatal("two holes must not mark the file failed")
-	}
-}
-
-func TestMissingArticlesPastPolicyFailFatally(t *testing.T) {
-	const segmentSize = 1024
-	// Holes on every other segment: each is an isolated glitch under the run
-	// cap, so it is the cumulative cap alone that ends the stream.
-	missing := make([]int, 0, MaxZeroFills+1)
-	for i := 1; i <= MaxZeroFills+1; i++ {
-		missing = append(missing, 2*i)
-	}
-	fetcher := newDamagedSegmentFetcher(segmentSize, missing...)
-	f := NewFile(context.Background(), damagedNZBFile(2*(MaxZeroFills+1)+4, segmentSize), nil, fetcher)
-
-	stream, err := f.OpenStreamCtx(playbackCtx())
-	if err != nil {
-		t.Fatalf("OpenStreamCtx returned error: %v", err)
-	}
-	defer stream.Close()
-
-	_, err = io.ReadAll(stream)
-	if !errors.Is(err, ErrTooManyZeroFills) {
-		t.Fatalf("read error = %v, want ErrTooManyZeroFills", err)
-	}
-	// The 430 must survive the join: the serve layer classifies the release from
-	// this cause, not from the threshold sentinel alone.
 	if !nntp.IsArticleNotFound(err) {
-		t.Fatalf("read error lost its missing-article cause: %v", err)
+		t.Fatalf("read error = %v, want missing-article error", err)
 	}
-	if holes := f.ZeroFilledSegments(); holes != MaxZeroFills {
-		t.Fatalf("zero-filled segments = %d, want %d", holes, MaxZeroFills)
+	if len(got) != 3*segmentSize {
+		t.Fatalf("read %d bytes before failed segment, want %d", len(got), 3*segmentSize)
 	}
-	if !f.IsFailed() {
-		t.Fatal("a file past the zero-fill cap must report as failed")
+	for i := 0; i < 3; i++ {
+		want := segmentPayload(i, segmentSize)
+		if !bytes.Equal(got[i*segmentSize:(i+1)*segmentSize], want) {
+			t.Fatalf("segment %d did not preserve its source bytes", i)
+		}
+	}
+	if f.IsFailed() != true {
+		t.Fatal("a confirmed missing article must mark the source unavailable")
 	}
 }
 
-func TestZeroFilledSegmentIsNotRefetched(t *testing.T) {
+func TestMissingArticleReadAtReturnsOnlyVerifiedPrefix(t *testing.T) {
 	const segmentSize = 1024
 	fetcher := newDamagedSegmentFetcher(segmentSize, 2)
-	f := NewFile(context.Background(), damagedNZBFile(6, segmentSize), nil, fetcher)
+	f := strictDamagedFile(6, segmentSize, fetcher)
 
-	for pass := 0; pass < 3; pass++ {
-		data, err := f.DownloadSegment(context.Background(), 2)
-		if err != nil {
-			t.Fatalf("pass %d: DownloadSegment returned error: %v", pass, err)
-		}
-		if !bytes.Equal(data, make([]byte, segmentSize)) {
-			t.Fatalf("pass %d: expected a zero-filled segment", pass)
-		}
+	buf := bytes.Repeat([]byte{0xcc}, 3*segmentSize)
+	n, err := f.ReadAt(buf, 0)
+	if !nntp.IsArticleNotFound(err) {
+		t.Fatalf("ReadAt error = %v, want missing-article error", err)
 	}
-	if got := fetcher.fetchCount(2); got != 1 {
-		t.Fatalf("known hole was fetched %d times, want 1", got)
+	if n != 2*segmentSize {
+		t.Fatalf("ReadAt copied %d bytes, want verified prefix %d", n, 2*segmentSize)
 	}
-	if holes := f.ZeroFilledSegments(); holes != 1 {
-		t.Fatalf("re-reading one hole counted %d holes, want 1", holes)
+	if !bytes.Equal(buf[:n], append(segmentPayload(0, segmentSize), segmentPayload(1, segmentSize)...)) {
+		t.Fatal("ReadAt returned bytes other than the verified source prefix")
+	}
+	if !bytes.Equal(buf[2*segmentSize:], bytes.Repeat([]byte{0xcc}, segmentSize)) {
+		t.Fatal("ReadAt wrote fabricated bytes after the failed segment")
 	}
 }
 
@@ -193,11 +157,8 @@ func TestTransientFetchFailureIsAnErrorNotAHole(t *testing.T) {
 	if nntp.IsArticleNotFound(err) {
 		t.Fatalf("a transient failure must not read as a missing article: %v", err)
 	}
-	if holes := f.ZeroFilledSegments(); holes != 0 {
-		t.Fatalf("a transient failure must not be zero-filled, got %d holes", holes)
-	}
 	if f.IsFailed() {
-		t.Fatal("a transient failure must not count toward the zero-fill cap")
+		t.Fatal("a transient failure must not be classified as a confirmed missing article")
 	}
 }
 
@@ -264,7 +225,7 @@ func TestMissingFirstArticleStillFailsFast(t *testing.T) {
 	if !nntp.IsArticleNotFound(err) {
 		t.Fatalf("DownloadSegment(0) = %v, want a missing-article error", err)
 	}
-	if holes := f.ZeroFilledSegments(); holes != 0 {
-		t.Fatalf("a missing header segment must not be zero-filled, got %d holes", holes)
+	if !f.IsFailed() {
+		t.Fatal("a missing header segment must mark the source unavailable")
 	}
 }

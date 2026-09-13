@@ -76,6 +76,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.AbsoluteAlignment
@@ -88,6 +89,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -124,6 +126,7 @@ import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
 import androidx.compose.ui.res.stringResource
 import com.nuvio.tv.R
+import com.nuvio.tv.core.qr.QrCodeGenerator
 import com.nuvio.tv.ui.util.localizeEpisodeTitle
 import com.nuvio.tv.data.local.InternalPlayerEngine
 import com.nuvio.tv.data.local.LibassRenderType
@@ -139,6 +142,7 @@ import java.util.concurrent.TimeUnit
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.lazy.rememberLazyListState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.media3.exoplayer.ExoPlayer
@@ -178,6 +182,9 @@ fun PlayerScreen(
     val subtitleDelaySyncLineFocusRequester = remember { FocusRequester() }
     var subtitleTimingConsumeNextConfirmKeyUp by remember { mutableStateOf(false) }
     var reportCodeVisible by remember { mutableStateOf(false) }
+    var diagnosticShareLink by remember { mutableStateOf<com.nuvio.tv.core.diagnostics.DiagnosticShareLink?>(null) }
+    var diagnosticShareError by remember { mutableStateOf<String?>(null) }
+    val diagnosticShareScope = rememberCoroutineScope()
     var exitDispatched by remember { mutableStateOf(false) }
     var externalHandoffInProgress by remember { mutableStateOf(false) }
 
@@ -200,6 +207,21 @@ fun PlayerScreen(
     }
     val dismissStreamInfoOverlay = {
         viewModel.onEvent(PlayerEvent.OnDismissStreamInfo)
+    }
+    val requestPlaybackReport: () -> Unit = {
+        val savedId = uiState.playbackIssueReportId
+        if (savedId.isNullOrBlank()) {
+            viewModel.onEvent(PlayerEvent.OnReportPlaybackIssue)
+        } else {
+            diagnosticShareScope.launch {
+                viewModel.openSavedDiagnosticReport(savedId)
+                    .onSuccess {
+                        diagnosticShareError = null
+                        diagnosticShareLink = it
+                    }
+                    .onFailure { diagnosticShareError = "Could not open phone review: ${it.javaClass.simpleName}" }
+            }
+        }
     }
     val returnToPlayerFromPostPlay = {
         viewModel.returnToPlayerFromPostPlay()
@@ -993,7 +1015,7 @@ fun PlayerScreen(
                 reportStatus = uiState.playbackIssueReportStatus,
                 reportId = uiState.playbackIssueReportId,
                 reportError = uiState.playbackIssueReportError,
-                onReport = { viewModel.onEvent(PlayerEvent.OnReportPlaybackIssue) },
+                onReport = requestPlaybackReport,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 72.dp)
@@ -1080,8 +1102,23 @@ fun PlayerScreen(
                 reportStatus = uiState.playbackIssueReportStatus,
                 reportId = uiState.playbackIssueReportId,
                 reportError = uiState.playbackIssueReportError,
-                onReport = { viewModel.onEvent(PlayerEvent.OnReportPlaybackIssue) },
+                onReport = requestPlaybackReport,
                 onBack = exitPlayerFromError
+            )
+        }
+        diagnosticShareLink?.let { link ->
+            DiagnosticPhoneReviewDialog(
+                link = link,
+                onDismiss = {
+                    viewModel.closeSavedDiagnosticReportShare()
+                    diagnosticShareLink = null
+                }
+            )
+        }
+        diagnosticShareError?.let { error ->
+            DiagnosticShareErrorDialog(
+                message = error,
+                onDismiss = { diagnosticShareError = null }
             )
         }
 
@@ -1268,7 +1305,7 @@ fun PlayerScreen(
                     viewModel.onEvent(PlayerEvent.OnToggleAspectRatio)
                 },
                 onSwitchPlayerEngine = { viewModel.onEvent(PlayerEvent.OnSwitchInternalPlayerEngine) },
-                onReportPlaybackIssue = { viewModel.onEvent(PlayerEvent.OnReportPlaybackIssue) },
+                onReportPlaybackIssue = requestPlaybackReport,
                 onToggleMoreActions = {
                     if (uiState.showMoreDialog) {
                         viewModel.onEvent(PlayerEvent.OnDismissMoreDialog)
@@ -3169,7 +3206,7 @@ private fun LoadingIssueReportAction(
         verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.sm)
     ) {
         val reportMessage = when (reportStatus) {
-            PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_sent, reportId.orEmpty())
+            PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_saved)
             PlaybackIssueReportStatus.Failed -> reportError ?: stringResource(R.string.player_report_issue_failed)
             PlaybackIssueReportStatus.Sending -> stringResource(R.string.player_report_issue_sending)
             PlaybackIssueReportStatus.Idle -> {
@@ -3190,13 +3227,12 @@ private fun LoadingIssueReportAction(
         DialogButton(
             text = when (reportStatus) {
                 PlaybackIssueReportStatus.Sending -> stringResource(R.string.player_report_issue_sending_button)
-                PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_sent_button)
+                PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_open_phone_review)
                 else -> stringResource(R.string.player_report_loading_issue)
             },
             onClick = onReport,
             isPrimary = false,
-            enabled = reportStatus != PlaybackIssueReportStatus.Sending &&
-                reportStatus != PlaybackIssueReportStatus.Sent,
+            enabled = reportStatus != PlaybackIssueReportStatus.Sending,
             modifier = Modifier.focusRequester(focusRequester)
         )
     }
@@ -3277,7 +3313,7 @@ private fun ErrorOverlay(
             val reportMessage = when (reportStatus) {
                 PlaybackIssueReportStatus.Idle -> null
                 PlaybackIssueReportStatus.Sending -> stringResource(R.string.player_report_issue_sending)
-                PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_sent, reportId.orEmpty())
+                PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_saved)
                 PlaybackIssueReportStatus.Failed -> reportError ?: stringResource(R.string.player_report_issue_failed)
             }
             if (showReportAction && reportMessage != null) {
@@ -3316,13 +3352,12 @@ private fun ErrorOverlay(
                     ErrorOverlayButton(
                         text = when (reportStatus) {
                             PlaybackIssueReportStatus.Sending -> stringResource(R.string.player_report_issue_sending_button)
-                            PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_sent_button)
+                            PlaybackIssueReportStatus.Sent -> stringResource(R.string.player_report_issue_open_phone_review)
                             else -> stringResource(R.string.player_report_issue)
                         },
                         onClick = onReport,
                         primary = false,
-                        enabled = reportStatus != PlaybackIssueReportStatus.Sending &&
-                            reportStatus != PlaybackIssueReportStatus.Sent,
+                        enabled = reportStatus != PlaybackIssueReportStatus.Sending,
                         modifier = Modifier
                             .focusRequester(reportFocusRequester)
                             .onFocusChanged { reportFocused = it.isFocused }

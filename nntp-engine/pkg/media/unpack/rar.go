@@ -317,8 +317,8 @@ func ScanArchive(ctx context.Context, files []UnpackableFile, password string, t
 
 		for _, f := range scanFirstVols {
 			if fc, ok := f.(interface{ IsFailed() bool }); ok && fc.IsFailed() {
-				logger.Error("First volume failed too many segments, aborting scan", "file", f.Name())
-				return nil, fmt.Errorf("first volume unavailable: %w", ErrTooManyZeroFills)
+				logger.Error("First volume has unavailable source data, aborting scan", "file", f.Name())
+				return nil, fmt.Errorf("first volume unavailable: %w", ErrSegmentUnavailable)
 			}
 		}
 

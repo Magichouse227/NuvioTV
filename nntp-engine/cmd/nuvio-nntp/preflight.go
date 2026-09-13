@@ -46,13 +46,9 @@ func verifyRequiredArchivesExist(ctx context.Context, files []*loader.File) (boo
 		if file == nil {
 			continue
 		}
-		if missing := file.MissingFromNZB(); missing > loader.MaxZeroFills {
+		if missing := file.MissingFromNZB(); missing > 0 {
 			return false, &errNZBIncomplete{message: fmt.Sprintf(
 				"archive volume %s is missing %d articles from the NZB itself", file.Name(), missing)}
-		}
-		if run := file.MissingRunFromNZB(); run > loader.MaxZeroFillRun {
-			return false, &errNZBIncomplete{message: fmt.Sprintf(
-				"archive volume %s is missing a run of %d consecutive articles from the NZB itself", file.Name(), run)}
 		}
 	}
 	statCtx, cancel := statSampleContext(ctx)

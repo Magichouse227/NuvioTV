@@ -87,6 +87,22 @@ func TestVerifyRequiredArchivesExistAcceptsPresentVolumes(t *testing.T) {
 	}
 }
 
+func TestVerifyRequiredArchivesExistRejectsAnyNZBGap(t *testing.T) {
+	file := loader.NewFile(context.Background(), &nzb.File{
+		Subject: "incomplete.mkv",
+		Groups:  []string{"alt.binaries.test"},
+		Segments: []nzb.Segment{
+			{ID: "first@test", Number: 1, Bytes: 1024},
+			{ID: "third@test", Number: 3, Bytes: 1024},
+		},
+	}, nil, &preflightFetcher{})
+
+	exists, err := verifyRequiredArchivesExist(context.Background(), []*loader.File{file})
+	if exists || !errors.Is(err, errFirstSegmentUnavailable) {
+		t.Fatalf("verifyRequiredArchivesExist() = (%v, %v), want incomplete NZB rejection", exists, err)
+	}
+}
+
 func TestVerifyRequiredArchivesExistRejectsDefinitive430(t *testing.T) {
 	exists, err := verifyRequiredArchivesExist(
 		context.Background(),

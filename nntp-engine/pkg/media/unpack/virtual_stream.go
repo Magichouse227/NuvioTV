@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"sync/atomic"
 
@@ -138,10 +139,18 @@ func (s *VirtualStream) Read(p []byte) (int, error) {
 				s.closeReader()
 			}
 
-			if n == 0 && s.offset < part.VirtualEnd {
-				// Exhausted this volume before the packed span ends (trailing RAR bytes).
-				// Advance to the next virtual part instead of stalling on a dead reader.
-				s.offset = part.VirtualEnd
+			if s.offset < part.VirtualEnd {
+				// The part declared bytes which its backing volume did not
+				// supply. Do not advance over the missing range: doing so
+				// contracts the response while callers retain totalSize and
+				// corrupts archive-backed media at the next part boundary.
+				shortErr := fmt.Errorf(
+					"virtual part %d ended at offset %d before declared end %d: %w",
+					partIdx, s.offset, part.VirtualEnd, io.ErrUnexpectedEOF,
+				)
+				log.Printf("NUVIO_DIAG event=archive_short_read offset=%d length=%d", s.offset, part.VirtualEnd)
+				s.mu.Unlock()
+				return n, shortErr
 			}
 			if n > 0 {
 				if s.offset >= part.VirtualEnd && s.offset < s.totalSize {
