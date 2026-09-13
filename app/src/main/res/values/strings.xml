@@ -3220,4 +3220,5 @@
     <string name="stream_test_video_bitrate">Average Video Bitrate: %1$s</string>
     <string name="stream_test_error_connection">Connection failed. The last played stream link may have expired or is unreachable. Please play the video again and retry.</string>
 
+    <string name="crash_report_browser_unavailable">Could not open a browser. Your report is saved. Install a browser on this TV and try again.</string>
 </resources>

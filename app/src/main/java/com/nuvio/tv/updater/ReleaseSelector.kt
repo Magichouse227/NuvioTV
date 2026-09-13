@@ -15,11 +15,7 @@ internal object ReleaseSelector {
         // The fork publishes a fixed, non-semver prerelease tag. Keep this channel
         // deliberately isolated so it can never be selected by stable/beta updates.
         releases.filterNot(GitHubReleaseDto::draft)
-            .filter { release ->
-                sequenceOf(release.tagName, release.name)
-                    .filterNotNull()
-                    .any { it.contains("nntp-testing", ignoreCase = true) }
-            }
+            .filter { release -> release.tagName == FORK_TEST_TAG }
     } else {
         releases
         .asSequence()

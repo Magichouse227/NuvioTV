@@ -23,14 +23,18 @@ class UpdatePreferences @Inject constructor(
 ) {
     private val dataStore = context.updateDataStore
 
+    // Keep the existing key so an app upgrade does not lose updater settings.
+    // Its value is now the complete release identity, not just the display tag.
     private val ignoredTagKey = stringPreferencesKey("ignored_release_tag")
     private val lastCheckAtKey = longPreferencesKey("last_check_at_ms")
     private val updateBannerEnabledKey = booleanPreferencesKey("update_banner_enabled")
     private val updateChannelKey = stringPreferencesKey("update_channel")
 
-    val ignoredTag: Flow<String?> = dataStore.data.map { prefs ->
+    val ignoredUpdateIdentity: Flow<String?> = dataStore.data.map { prefs ->
         prefs[ignoredTagKey]
     }
+
+    val ignoredTag: Flow<String?> = ignoredUpdateIdentity
 
     val lastCheckAtMs: Flow<Long> = dataStore.data.map { prefs ->
         prefs[lastCheckAtKey] ?: 0L
@@ -42,11 +46,17 @@ class UpdatePreferences @Inject constructor(
 
     val updateChannel: Flow<UpdateChannel> = dataStore.data.map { prefs ->
         UpdateChannel.fromStoredValue(prefs[updateChannelKey])
-            ?: UpdateChannel.defaultForVersion(BuildConfig.VERSION_NAME)
+            ?: UpdateChannel.defaultForVersion(
+                versionName = BuildConfig.VERSION_NAME,
+                isForkTestBuild = BuildConfig.IS_FORK_TEST_BUILD
+            )
     }
 
     suspend fun getOrInitializeUpdateChannel(): UpdateChannel {
-        val defaultChannel = UpdateChannel.defaultForVersion(BuildConfig.VERSION_NAME)
+        val defaultChannel = UpdateChannel.defaultForVersion(
+            versionName = BuildConfig.VERSION_NAME,
+            isForkTestBuild = BuildConfig.IS_FORK_TEST_BUILD
+        )
         var resolvedChannel = defaultChannel
         dataStore.edit { prefs ->
             resolvedChannel = UpdateChannel.fromStoredValue(prefs[updateChannelKey])
@@ -56,10 +66,18 @@ class UpdatePreferences @Inject constructor(
         return resolvedChannel
     }
 
-    suspend fun setIgnoredTag(tag: String?) {
+    suspend fun setIgnoredUpdateIdentity(identity: String?) {
         dataStore.edit { prefs ->
-            if (tag == null) prefs.remove(ignoredTagKey) else prefs[ignoredTagKey] = tag
+            if (identity == null) {
+                prefs.remove(ignoredTagKey)
+            } else {
+                prefs[ignoredTagKey] = identity
+            }
         }
+    }
+
+    suspend fun setIgnoredTag(tag: String?) {
+        setIgnoredUpdateIdentity(tag)
     }
 
     suspend fun setLastCheckAtMs(value: Long) {

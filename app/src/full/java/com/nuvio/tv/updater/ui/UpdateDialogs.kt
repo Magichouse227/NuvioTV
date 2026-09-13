@@ -64,7 +64,7 @@ internal fun UpdateReleaseNotesDialog(
     val shape = RoundedCornerShape(NuvioTheme.radii.md)
     val focusRingColor = NuvioTheme.colors.FocusRing
 
-    LaunchedEffect(update.tag) {
+    LaunchedEffect(update.identity) {
         notesFocusRequester.requestFocusAfterFrames()
     }
 

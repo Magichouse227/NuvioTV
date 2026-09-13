@@ -59,13 +59,14 @@ class UpdateViewModel @Inject constructor(
             }
             // Debug/full test builds use the fork's nntp-testing channel; release
             // builds retain the normal upstream stable/beta defaults.
-            if (enabled) {
+            if (enabled && (!BuildConfig.IS_DEBUG_BUILD || BuildConfig.IS_FORK_TEST_BUILD)) {
                 checkForUpdates(force = false, showNoUpdateFeedback = false)
             }
         }
     }
 
     fun checkForUpdates(force: Boolean, showNoUpdateFeedback: Boolean) {
+        if (_uiState.value.isDownloading) return
         if (!force && !_uiState.value.updateBannerEnabled) return
 
         updateCheckJob?.cancel()
@@ -81,7 +82,7 @@ class UpdateViewModel @Inject constructor(
                 )
             }
 
-            val dismissedTag = updatePreferences.ignoredTag.first()
+            val dismissedIdentity = updatePreferences.ignoredUpdateIdentity.first()
             val result = updateRepository.getLatestUpdate(channel)
             updatePreferences.setLastCheckAtMs(System.currentTimeMillis())
 
@@ -89,16 +90,32 @@ class UpdateViewModel @Inject constructor(
                 .onSuccess { update ->
                     val remoteNewer = if (channel == UpdateChannel.FORK_TEST) {
                         update.buildMarker != null &&
-                            update.buildMarker != BuildConfig.TEST_BUILD_SHA
+                            update.identity != UpdateIdentity.of(
+                            FORK_TEST_TAG,
+                            BuildConfig.TEST_BUILD_SHA
+                        )
                     } else {
                         VersionUtils.isRemoteNewer(update.tag, BuildConfig.VERSION_NAME)
                     }
+                    val retainedDownloadedApkPath = _uiState.value.downloadedApkPath
+                        ?.takeIf { path ->
+                            remoteNewer &&
+                                UpdateDownloadPolicy.shouldRetainDownloadedApk(
+                                    previousUpdateIdentity = _uiState.value.update?.identity,
+                                    currentUpdateIdentity = update.identity,
+                                    downloadedApkPath = path,
+                                    pathExists = { File(it).isFile }
+                                )
+                        }
+                    _uiState.value.downloadedApkPath
+                        ?.takeIf { it != retainedDownloadedApkPath }
+                        ?.let { File(it).delete() }
                     val shouldShow = UpdateBannerPolicy.shouldShow(
                         isRemoteNewer = remoteNewer,
                         force = force,
                         bannerEnabled = _uiState.value.updateBannerEnabled,
-                        dismissedTag = dismissedTag,
-                        updateTag = update.tag
+                        dismissedTag = dismissedIdentity,
+                        updateTag = update.identity
                     )
 
                     _uiState.update { state ->
@@ -108,9 +125,7 @@ class UpdateViewModel @Inject constructor(
                             isUpdateAvailable = remoteNewer,
                             isDownloading = false,
                             downloadProgress = null,
-                            downloadedApkPath = state.downloadedApkPath.takeIf {
-                                remoteNewer && state.update?.tag == update.tag
-                            },
+                            downloadedApkPath = retainedDownloadedApkPath,
                             showBanner = shouldShow,
                             showUnknownSourcesDialog = false,
                             errorMessage = null,
@@ -123,6 +138,7 @@ class UpdateViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
+                    _uiState.value.downloadedApkPath?.let { File(it).delete() }
                     _uiState.update {
                         it.copy(
                             isChecking = false,
@@ -165,10 +181,10 @@ class UpdateViewModel @Inject constructor(
                 errorMessage = null
             )
         }
-        val tag = state.update?.tag
-        if (tag != null) {
+        val identity = state.update?.identity
+        if (identity != null) {
             viewModelScope.launch {
-                updatePreferences.setIgnoredTag(tag)
+                updatePreferences.setIgnoredUpdateIdentity(identity)
             }
         }
     }
@@ -226,6 +242,7 @@ class UpdateViewModel @Inject constructor(
     }
 
     fun downloadUpdate() {
+        if (_uiState.value.isDownloading) return
         val update = _uiState.value.update ?: return
 
         viewModelScope.launch {
@@ -237,7 +254,9 @@ class UpdateViewModel @Inject constructor(
                 )
             }
 
-            val safeName = update.assetName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val safeName = ("${update.identity}-${update.assetName}")
+                .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                .take(200)
             val destination = File(File(context.cacheDir, "updates"), safeName)
             val result = withContext(Dispatchers.IO) {
                 apkDownloader.download(update.assetUrl, destination) { downloaded, total ->
@@ -252,6 +271,10 @@ class UpdateViewModel @Inject constructor(
 
             result
                 .onSuccess { file ->
+                    if (_uiState.value.update?.identity != update.identity) {
+                        file.delete()
+                        return@onSuccess
+                    }
                     _uiState.update {
                         it.copy(
                             isDownloading = false,
@@ -263,6 +286,7 @@ class UpdateViewModel @Inject constructor(
                     installUpdateOrRequestPermission()
                 }
                 .onFailure { error ->
+                    if (_uiState.value.update?.identity != update.identity) return@onFailure
                     _uiState.update {
                         it.copy(
                             isDownloading = false,

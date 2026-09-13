@@ -1,5 +1,7 @@
 package com.nuvio.tv.updater.model
 
+import com.nuvio.tv.updater.UpdateIdentity
+
 data class AppUpdate(
     val tag: String,
     val buildMarker: String?,
@@ -9,4 +11,7 @@ data class AppUpdate(
     val assetName: String,
     val assetUrl: String,
     val assetSizeBytes: Long?
-)
+) {
+    val identity: String
+        get() = UpdateIdentity.of(tag, buildMarker)
+}

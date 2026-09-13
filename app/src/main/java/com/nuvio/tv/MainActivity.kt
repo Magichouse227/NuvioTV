@@ -399,7 +399,12 @@ open class MainActivity : ComponentActivity() {
             val hasSeenAuthQrOnFirstLaunch by hasSeenAuthQrFlow.collectAsState(initial = null)
             val authState by authManager.authState.collectAsState()
             val context = LocalContext.current
-            var pendingCrashReport by remember { mutableStateOf(crashReportStore.read()) }
+            var pendingCrashReport by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(crashReportStore) {
+                pendingCrashReport = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    crashReportStore.read()
+                }
+            }
 
             if (pendingCrashReport != null) {
                 CrashReportPrompt(
@@ -2384,17 +2389,23 @@ private fun rememberRawSvgPainter(rawIconRes: Int): Painter {
     )
 }
 
+@OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun CrashReportPrompt(
     report: String,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val openFocusRequester = remember { FocusRequester() }
     NuvioDialog(
         onDismiss = onDismiss,
         title = stringResource(R.string.crash_report_prompt_title),
         subtitle = stringResource(R.string.crash_report_prompt_subtitle)
     ) {
+        LaunchedEffect(Unit) {
+            withFrameNanos { }
+            openFocusRequester.requestFocus()
+        }
         Text(
             text = stringResource(R.string.crash_report_prompt_privacy),
             color = NuvioTheme.colors.TextSecondary,
@@ -2406,20 +2417,32 @@ private fun CrashReportPrompt(
         ) {
             Button(
                 onClick = {
-                    val issueUri = Uri.parse(
+                    fun issueUri(body: String) = Uri.parse(
                         "https://github.com/Magichouse227/NuvioTV/issues/new"
                     ).buildUpon()
                         .appendQueryParameter("title", "Native test build crash")
-                        // Keep the composer URL usable on TV browsers while retaining the
-                        // complete bounded report on disk until this action is selected.
-                        .appendQueryParameter("body", report.take(1_500))
+                        .appendQueryParameter("body", body)
                         .build()
-                    runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, issueUri))
+                    // Bound the encoded URL, not just the unencoded report characters.
+                    var body = report.take(1_500)
+                    var uri = issueUri(body)
+                    while (uri.toString().length > 2_000 && body.isNotEmpty()) {
+                        body = body.dropLast(100.coerceAtMost(body.length))
+                        uri = issueUri(body)
                     }
-                    onDismiss()
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    }.onSuccess {
+                        onDismiss()
+                    }.onFailure {
+                        Toast.makeText(
+                            context,
+                            R.string.crash_report_browser_unavailable,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 },
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f).focusRequester(openFocusRequester)
             ) {
                 Text(stringResource(R.string.crash_report_prompt_open))
             }

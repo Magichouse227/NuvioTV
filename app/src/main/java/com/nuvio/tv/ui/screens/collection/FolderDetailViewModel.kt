@@ -45,6 +45,10 @@ import com.nuvio.tv.domain.repository.CatalogRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -56,6 +60,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import javax.inject.Inject
 
@@ -155,6 +161,8 @@ class FolderDetailViewModel @Inject constructor(
     private val lowRamDevice = LowRamDevicePolicy.isLowRam(appContext)
     private val sourceLoadSemaphore = Semaphore(if (lowRamDevice) 1 else 3)
     private var modernPresentationJob: Job? = null
+    private var followLayoutRebuildJob: Job? = null
+    private val modernPresentationMutex = Mutex()
 
     /** Items for which enrichment was attempted but produced no enriched data. */
     private val _failedEnrichmentIds = MutableStateFlow<Set<String>>(emptySet())
@@ -430,6 +438,16 @@ class FolderDetailViewModel @Inject constructor(
     }
 
     private fun rebuildFollowLayoutState() {
+        modernPresentationJob?.cancel()
+        followLayoutRebuildJob?.cancel()
+        followLayoutRebuildJob = viewModelScope.launch {
+            // Coalesce bursts of catalog results before allocating presentation snapshots.
+            delay(if (lowRamDevice) 100L else 40L)
+            rebuildFollowLayoutStateNow()
+        }
+    }
+
+    private fun rebuildFollowLayoutStateNow() {
         val state = _uiState.value
         if (state.viewMode != FolderViewMode.FOLLOW_LAYOUT) return
         val sourceTabs = state.tabs.filter { !it.isAllTab }
@@ -531,8 +549,11 @@ class FolderDetailViewModel @Inject constructor(
                 val tmdbEnabledForModern = tmdbSettings.enabled &&
                     (currentHomeLayout != HomeLayout.MODERN || tmdbSettings.modernHomeEnabled)
                 val externalMetaEnabled = layoutPreferenceDataStore.preferExternalMetaAddonDetail.first()
-                val computedHeroEnrichmentEnabled = tmdbEnabledForModern || externalMetaEnabled
-                val modernPresentation = buildModernHomePresentation(
+                val computedHeroEnrichmentEnabled = !lowRamDevice &&
+                    (tmdbEnabledForModern || externalMetaEnabled)
+                val modernPresentation = modernPresentationMutex.withLock {
+                    ensureActive()
+                    buildModernHomePresentation(
                     input = ModernHomePresentationInput(
                         homeRows = homeRows,
                         catalogRows = allRows,
@@ -546,7 +567,12 @@ class FolderDetailViewModel @Inject constructor(
                     ),
                     cache = modernCarouselRowBuildCache,
                     context = appContext
-                )
+                    )
+                }
+                // The CPU-bound builder is not cancellable. Never publish its stale result,
+                // and serialize cache access while a cancelled build finishes.
+                ensureActive()
+                withContext(Dispatchers.Main.immediate) {
                 _uiState.update { s ->
                     val homeState = HomeUiState(
                         catalogRows = allRows,
@@ -577,6 +603,7 @@ class FolderDetailViewModel @Inject constructor(
                         classicFocusGradientEnabled = s.classicFocusGradientEnabled
                     )
                     s.copy(followLayoutHomeState = homeState.copy(modernHomePresentation = modernPresentation))
+                }
                 }
             }
         } else {
@@ -658,7 +685,9 @@ class FolderDetailViewModel @Inject constructor(
                     }
                     state.copy(tabs = tabs)
                 }
-                return@launch
+                rebuildAllTab()
+                rebuildFollowLayoutState()
+                return@launchInitialSourceLoad
             }
 
             var catalog = addon.catalogs.find { it.id == source.catalogId && it.apiType == source.type }
@@ -770,7 +799,7 @@ class FolderDetailViewModel @Inject constructor(
         rebuildAllTab()
         rebuildFollowLayoutState()
 
-        viewModelScope.launch {
+        launchInitialSourceLoad {
             val nextSkip = row.nextCatalogSkip()
 
             catalogRepository.getCatalog(

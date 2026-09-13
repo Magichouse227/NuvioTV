@@ -126,6 +126,8 @@ android {
             "TEST_BUILD_SHA",
             buildConfigString(providers.environmentVariable("GITHUB_SHA").orNull ?: "local")
         )
+        // Only the fullDebug variant is overridden below for fork test releases.
+        buildConfigField("boolean", "IS_FORK_TEST_BUILD", "false")
 
         buildConfigField("String", "PARENTAL_GUIDE_API_URL", "\"${localProperties.getProperty("PARENTAL_GUIDE_API_URL", "")}\"")
         buildConfigField("String", "INTRODB_API_URL", "\"${localProperties.getProperty("INTRODB_API_URL", "")}\"")
@@ -357,6 +359,20 @@ android {
 }
 
 androidComponents {
+    onVariants { variant ->
+        val isFullDebug = variant.buildType == "debug" &&
+            variant.productFlavors.any { it.second == "full" }
+        if (isFullDebug) {
+            variant.buildConfigFields.put(
+                "IS_FORK_TEST_BUILD",
+                com.android.build.api.variant.BuildConfigField(
+                    "boolean",
+                    "true",
+                    "NNTP fork-test updater channel"
+                )
+            )
+        }
+    }
     onVariants(selector().withBuildType("debug")) { variant ->
         val isPlaystore = variant.productFlavors.any { it.second == "playstore" }
         variant.applicationId.set(if (isPlaystore) "com.nuvio.appdebug" else "com.nuviodebug.com")

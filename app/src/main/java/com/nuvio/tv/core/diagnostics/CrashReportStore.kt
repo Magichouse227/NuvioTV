@@ -4,8 +4,6 @@ import android.content.Context
 import android.os.Build
 import com.nuvio.tv.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.io.PrintWriter
-import java.io.StringWriter
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -26,7 +24,6 @@ class CrashReportStore @Inject constructor(
     companion object {
         private const val KEY_ALIAS = "nuvio_crash_report"
         private const val FILE_NAME = "pending_crash_report"
-        private const val MAX_STACK_CHARS = 6_000
         private const val MAX_REPORT_CHARS = 10_000
         private const val VERSION = 1
     }
@@ -35,11 +32,17 @@ class CrashReportStore @Inject constructor(
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
-                write(CrashReport.from(thread, throwable))
-            } catch (_: Exception) {
+                write(CrashReport.from(throwable))
+            } catch (_: Throwable) {
                 // Crash handling must never obscure the original exception.
+            } finally {
+                if (previous != null) {
+                    previous.uncaughtException(thread, throwable)
+                } else {
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                    kotlin.system.exitProcess(10)
+                }
             }
-            previous?.uncaughtException(thread, throwable)
         }
     }
 
@@ -109,41 +112,24 @@ class CrashReportStore @Inject constructor(
     }
 
     private data class CrashReport(
-        val thread: String,
         val throwable: Throwable
     ) {
         fun render(): String {
-            val trace = StringWriter().also { writer ->
-                throwable.printStackTrace(PrintWriter(writer))
-            }.toString().take(MAX_STACK_CHARS)
             return buildString {
                 appendLine("NuvioTV uncaught crash report (format $VERSION)")
                 appendLine("appVersion=${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                appendLine("build=${BuildConfig.TEST_BUILD_SHA}")
                 appendLine("package=${BuildConfig.APPLICATION_ID}")
                 appendLine("device=${Build.MANUFACTURER} ${Build.MODEL}")
                 appendLine("android=${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
-                appendLine("thread=${thread.take(80)}")
+                appendLine("Exception messages and thread names omitted for privacy.")
                 appendLine()
-                appendLine(redact(trace))
+                appendLine(CrashReportFormatter.stackSummary(throwable))
             }.take(MAX_REPORT_CHARS)
         }
 
         companion object {
-            fun from(thread: Thread, throwable: Throwable): String =
-                CrashReport(thread.name, throwable).render()
-
-            private fun redact(value: String): String {
-                var redacted = value
-                redacted = redacted.replace(
-                    Regex("(?i)(authorization|bearer|token|password|secret|api[_-]?key)(\\s*[:=]\\s*)[^\\s,;]+"),
-                    "$1$2[REDACTED]"
-                )
-                redacted = redacted.replace(
-                    Regex("(?i)([?&](?:token|password|secret|api[_-]?key)=)[^&\\s]+"),
-                    "$1[REDACTED]"
-                )
-                return redacted
-            }
+            fun from(throwable: Throwable): String = CrashReport(throwable).render()
         }
     }
 }

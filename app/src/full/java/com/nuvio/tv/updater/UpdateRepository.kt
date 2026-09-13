@@ -45,9 +45,13 @@ class UpdateRepository @Inject constructor(
                 ?: throw NoEligibleUpdateException(channel)
             val (dto, asset) = releaseWithAsset
 
-            val tag = dto.tagName?.takeIf { it.isNotBlank() }
-                ?: dto.name?.takeIf { it.isNotBlank() }
-                ?: error("Release has no tag/name")
+            val tag = if (channel == UpdateChannel.FORK_TEST) {
+                FORK_TEST_TAG
+            } else {
+                dto.tagName?.takeIf { it.isNotBlank() }
+                    ?: dto.name?.takeIf { it.isNotBlank() }
+                    ?: error("Release has no tag/name")
+            }
 
             AppUpdate(
                 tag = tag,
