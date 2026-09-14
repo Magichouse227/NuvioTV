@@ -441,9 +441,13 @@ afterEvaluate {
             ) {
                 if (result.resultType == org.gradle.api.tasks.testing.TestResult.ResultType.FAILURE) {
                     // Annotations remain accessible even when GitHub's redirected log archive
-                    // cannot be downloaded. Never include environment/configuration values.
+                    // cannot be downloaded. Omit exception messages/arguments: mocked call
+                    // descriptions can include build-time service configuration.
                     val detail = (descriptor.name + "\n" +
-                        result.exceptions.joinToString("\n") { it.stackTraceToString() })
+                        result.exceptions.joinToString("\n") { error ->
+                            error.javaClass.name + "\n" +
+                                error.stackTrace.take(40).joinToString("\n") { "at $it" }
+                        })
                         .take(8_000).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
                     logger.lifecycle("::error title=${descriptor.className}::$detail")
                 }
