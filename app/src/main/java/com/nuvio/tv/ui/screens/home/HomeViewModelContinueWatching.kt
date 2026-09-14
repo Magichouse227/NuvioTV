@@ -1164,6 +1164,9 @@ internal fun HomeViewModel.loadContinueWatchingPipeline() {
                 // If TMDB enrichment is enabled for CW, skip grace period to avoid
                 // visible flash of addon data being replaced by TMDB data.
                 debug.markPhase("enrichment-grace")
+                // Keep cached/local CW usable before optional remote enrichment competes with
+                // startup. The coordinator always releases this via interaction or fallback.
+                startupEnrichmentAllowed.first { it }
                 val tmdbEnrichCw = currentTmdbSettings.enabled && currentTmdbSettings.enrichContinueWatching
                 val enrichmentDelayMs = if (tmdbEnrichCw) 0L else remainingContinueWatchingEnrichmentGraceMs()
                 debug.recordEnrichmentDelay(enrichmentDelayMs)

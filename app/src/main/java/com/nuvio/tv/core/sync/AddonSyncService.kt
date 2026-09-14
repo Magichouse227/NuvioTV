@@ -6,6 +6,7 @@ import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.data.local.AddonPreferences
 import com.nuvio.tv.data.remote.supabase.SupabaseAddon
 import io.github.jan.supabase.postgrest.Postgrest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -29,6 +30,8 @@ class AddonSyncService @Inject constructor(
     private suspend fun <T> withJwtRefreshRetry(block: suspend () -> T): T {
         return try {
             block()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (!authManager.refreshSessionIfJwtExpired(e)) throw e
             block()
@@ -86,24 +89,40 @@ class AddonSyncService @Inject constructor(
         }
     }
 
-    suspend fun getRemoteAddonUrls(): Result<List<String>> = withContext(Dispatchers.IO) {
+    suspend fun getRemoteAddonUrls(
+        userId: String? = null,
+        profileId: Int? = null,
+        canApply: () -> Boolean = { true }
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
         try {
-            val effectiveUserId = authManager.getEffectiveUserId(fallbackToOwnIdOnFailure = false)
+            val effectiveUserId = userId ?: authManager.getEffectiveUserId(fallbackToOwnIdOnFailure = false)
                 ?: return@withContext Result.failure(
                     IllegalStateException("Unable to resolve sync owner for addon sync")
                 )
 
-            val activeProfile = profileManager.activeProfile
-            val profileId = if (activeProfile != null && !activeProfile.isPrimary && activeProfile.usesPrimaryAddons) 1
-                            else profileManager.activeProfileId.value
+            val requestedProfileId = profileId ?: profileManager.activeProfileId.value
+            val requestedProfile = profileManager.profiles.value
+                .firstOrNull { it.id == requestedProfileId }
+            val remoteProfileId = if (
+                requestedProfile != null &&
+                !requestedProfile.isPrimary &&
+                requestedProfile.usesPrimaryAddons
+            ) {
+                1
+            } else {
+                requestedProfileId
+            }
 
             val remoteAddons = withJwtRefreshRetry {
                 postgrest.from("addons")
                     .select { filter {
                         eq("user_id", effectiveUserId)
-                        eq("profile_id", profileId)
+                        eq("profile_id", remoteProfileId)
                     } }
                     .decodeList<SupabaseAddon>()
+            }
+            if (!canApply()) {
+                throw CancellationException("Addon sync identity changed before applying metadata")
             }
 
             val nameMap = mutableMapOf<String, String>()
@@ -116,8 +135,13 @@ class AddonSyncService @Inject constructor(
                 enabledMap[canonicalUrl] = addon.enabled
             }
             if (remoteAddons.isNotEmpty()) {
-                addonPreferences.setUserSetNames(nameMap)
-                addonPreferences.setAddonEnabledStates(enabledMap)
+                // The caller may be completing after the active profile changed. Write the
+                // captured profile's store, never whichever profile happens to be active now.
+                addonPreferences.setUserSetNames(nameMap, requestedProfileId)
+                if (!canApply()) {
+                    throw CancellationException("Addon sync identity changed before applying metadata")
+                }
+                addonPreferences.setAddonEnabledStates(enabledMap, requestedProfileId)
             }
 
             Result.success(
@@ -125,6 +149,8 @@ class AddonSyncService @Inject constructor(
                 .sortedBy { it.sortOrder }
                 .map { it.url }
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get remote addon URLs", e)
             Result.failure(e)

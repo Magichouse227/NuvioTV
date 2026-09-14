@@ -150,6 +150,8 @@ val buildNntpEngine by tasks.registering {
     inputs.file(nntpEngineBuildScript)
     inputs.file(nntpEngineWindowsBuildScript)
     outputs.files(nntpEngineOutputs)
+    // CI must rebuild every ABI rather than accepting the checked-in native set.
+    outputs.upToDateWhen { providers.environmentVariable("GITHUB_ACTIONS").orNull != "true" }
     dependsOn(verifyNntpEngineToolchain)
 }
 
@@ -162,7 +164,7 @@ android {
         applicationId = "com.nuvio.tv"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1058
+        versionCode = 1059
         versionName = "0.9.2-beta"
         buildConfigField(
             "String",
@@ -258,6 +260,9 @@ android {
         debug {
             signingConfig = signingConfigs.getByName("release")
             isDebuggable = false
+            // Keep the test channel unshrunk until dynamic plugins, serializers and
+            // every JNI playback engine pass an optimized-build runtime matrix.
+            // Switching to release also changes login/updater identity; see docs/performance.md.
             isMinifyEnabled = false
 
             buildConfigField("boolean", "IS_DEBUG_BUILD", "true")
@@ -398,6 +403,63 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+}
+
+// Keep signed-test delivery checks in the native build, so the established signing
+// workflow cannot upload a package before its startup/browsing regressions pass.
+// A separate Test task is deliberate: the existing workflow restricts its unit-test
+// task with --tests selectors, which must not accidentally exclude this coverage.
+afterEvaluate {
+    val standardTests = tasks.named<Test>("testFullDebugUnitTest")
+    val performanceTests = tasks.register<Test>("testFullDebugPerformance") {
+        group = "verification"
+        description = "Checks startup readiness, profile isolation and bounded browsing."
+        dependsOn(standardTests)
+        val original = standardTests.get()
+        testClassesDirs = original.testClassesDirs
+        classpath = original.classpath
+        systemProperties(original.systemProperties)
+        maxHeapSize = "2g"
+        filter {
+            includeTestsMatching("com.nuvio.tv.core.sync.*")
+            includeTestsMatching("com.nuvio.tv.core.startup.*")
+            includeTestsMatching("com.nuvio.tv.ui.components.StartupLoadingPolicyTest")
+            includeTestsMatching("com.nuvio.tv.ui.screens.home.*")
+            includeTestsMatching("com.nuvio.tv.data.repository.*")
+            includeTestsMatching("com.nuvio.tv.data.local.ImagePerformancePreferencesTest")
+            includeTestsMatching("com.nuvio.tv.core.usenet.NntpRateLimitTest")
+            includeTestsMatching("com.nuvio.tv.core.usenet.NntpEngineApiCancellationTest")
+            includeTestsMatching("com.nuvio.tv.core.usenet.NntpStartupGateTest")
+            includeTestsMatching("com.nuvio.tv.ui.screens.player.PlayerRuntimeErrorRecoveryPolicyTest")
+        }
+    }
+    if (providers.environmentVariable("GITHUB_ACTIONS").orNull == "true") {
+        tasks.named("assembleFullDebug").configure {
+            dependsOn(performanceTests)
+            doLast {
+                val tools = androidComponents.sdkComponents.sdkDirectory.get().asFile
+                    .resolve("build-tools/${android.buildToolsVersion}")
+                exec {
+                    workingDir(rootProject.projectDir)
+                    commandLine("python3", "-m", "unittest", "discover",
+                        "-s", "scripts/tests", "-p", "test_verify_test_apk.py")
+                }
+                exec {
+                    workingDir(rootProject.projectDir)
+                    commandLine(
+                        "python3", "scripts/verify-test-apk.py",
+                        "app/build/outputs/apk/full/debug/app-full-universal-debug.apk",
+                        "--build-sha", providers.environmentVariable("GITHUB_SHA").get(),
+                        "--native-dir",
+                        "app/build/intermediates/stripped_native_libs/fullDebug/stripFullDebugDebugSymbols/out/lib",
+                        "--aapt", tools.resolve("aapt").absolutePath,
+                        "--apksigner", tools.resolve("apksigner").absolutePath,
+                        "--output", "app/build/outputs/apk/full/debug/verification.json"
+                    )
+                }
+            }
+        }
     }
 }
 

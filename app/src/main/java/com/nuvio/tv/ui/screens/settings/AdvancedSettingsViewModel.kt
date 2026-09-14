@@ -24,6 +24,7 @@ data class AdvancedSettingsUiState(
     val playbackIssueReportsEnabled: Boolean = false,
     val playerStatsHudEnabled: Boolean = false,
     val rgb565Enabled: Boolean = true,
+    val reduceHomeEffectsEnabled: Boolean = false,
     val sentryEnabled: Boolean = true
 )
 
@@ -34,6 +35,7 @@ sealed class AdvancedSettingsEvent {
     data class SetPlaybackIssueReportsEnabled(val enabled: Boolean) : AdvancedSettingsEvent()
     data class SetPlayerStatsHudEnabled(val enabled: Boolean) : AdvancedSettingsEvent()
     data class SetRgb565Enabled(val enabled: Boolean) : AdvancedSettingsEvent()
+    data class SetReduceHomeEffectsEnabled(val enabled: Boolean) : AdvancedSettingsEvent()
     data class SetSentryEnabled(val enabled: Boolean) : AdvancedSettingsEvent()
 }
 
@@ -50,7 +52,12 @@ class AdvancedSettingsViewModel @Inject constructor(
     val uiState: StateFlow<AdvancedSettingsUiState> = _uiState.asStateFlow()
 
     init {
-        _uiState.update { it.copy(rgb565Enabled = imagePerformancePreferences.rgb565Enabled) }
+        _uiState.update {
+            it.copy(
+                rgb565Enabled = imagePerformancePreferences.rgb565Enabled,
+                reduceHomeEffectsEnabled = imagePerformancePreferences.reduceHomeEffects
+            )
+        }
         viewModelScope.launch {
             layoutPreferenceDataStore.fastHorizontalNavigationEnabled.collectLatest { enabled ->
                 _uiState.update { it.copy(fastHorizontalNavigationEnabled = enabled) }
@@ -114,6 +121,11 @@ class AdvancedSettingsViewModel @Inject constructor(
                 if (imagePerformancePreferences.setRgb565Enabled(event.enabled)) {
                     _uiState.update { it.copy(rgb565Enabled = event.enabled) }
                     appRestarter.restart()
+                }
+            }
+            is AdvancedSettingsEvent.SetReduceHomeEffectsEnabled -> {
+                if (imagePerformancePreferences.setReduceHomeEffects(event.enabled)) {
+                    _uiState.update { it.copy(reduceHomeEffectsEnabled = event.enabled) }
                 }
             }
             is AdvancedSettingsEvent.SetSentryEnabled -> {

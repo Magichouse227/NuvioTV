@@ -29,3 +29,18 @@ fun shouldShowHomeStartupLoader(
     sharedSplashEnabled: Boolean,
     startupComplete: Boolean
 ): Boolean = loading && (!sharedSplashEnabled || startupComplete)
+
+/**
+ * A home shell may only use local cached/placeholder data after the active profile is known.
+ * Keeping this pure makes the profile boundary explicit at the call site and regression tests.
+ */
+fun canRenderCachedHomeShell(
+    activeProfileReady: Boolean,
+    activeProfileId: Int?,
+    cachedContentProfileId: Int?,
+    layoutPreferencesReady: Boolean,
+    hasCachedShellContent: Boolean
+): Boolean = activeProfileReady &&
+    cachedContentProfileId == activeProfileId &&
+    layoutPreferencesReady &&
+    hasCachedShellContent

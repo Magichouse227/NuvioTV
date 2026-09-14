@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -59,6 +60,7 @@ import com.nuvio.tv.ui.util.contentTextDirection
 import com.nuvio.tv.ui.util.recompositionHighlighter
 import coil3.request.transitionFactory
 import com.nuvio.tv.R
+import com.nuvio.tv.data.local.imagePerformancePreferences
 import kotlinx.coroutines.delay
 import com.nuvio.tv.ui.components.ImdbRatingSourceLabel
 import com.nuvio.tv.ui.components.TrailerPlayer
@@ -70,6 +72,15 @@ private data class ModernHeroSecondaryMeta(
     val status: String?,
     val details: List<String>
 )
+
+@Composable
+private fun rememberReduceHomeEffects(): Boolean {
+    val context = LocalContext.current
+    val preferences = remember(context) {
+        imagePerformancePreferences(context)
+    }
+    return preferences.reduceHomeEffectsFlow.collectAsState().value
+}
 
 @Composable
 internal fun ModernHeroScene(
@@ -127,12 +138,14 @@ internal fun ModernHeroMediaLayer(
 ) {
     val shouldPlay by remember { derivedStateOf { shouldPlayHeroTrailer() } }
     val trailerRendered by remember { derivedStateOf { heroTrailerFirstFrameRendered() } }
+    val localContext = LocalContext.current
+    val reduceHomeEffects = rememberReduceHomeEffects()
+    // This setting only reduces visual work. It does not disable the selected trailer or playback.
     val transitionProgressState = animateFloatAsState(
         targetValue = if (shouldPlay && trailerRendered) 1f else 0f,
         animationSpec = tween(durationMillis = 480),
         label = "heroBackdropTrailerCrossfadeProgress"
     )
-    val localContext = LocalContext.current
 
     // Backdrop URL is managed upstream (heroSceneStateLambda freezes it
     // during rapid nav / scroll). Only update when enrichment is not active
@@ -161,23 +174,40 @@ internal fun ModernHeroMediaLayer(
     }
 
     Box(modifier = modifier) {
-        androidx.compose.animation.Crossfade(
-            targetState = imageModel,
-            animationSpec = tween(durationMillis = NuvioMotion.tokens.durations.overlay),
-            label = "heroBackdropCrossfade"
-        ) { model ->
+        val backdropModifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                // Avoid an explicit offscreen buffer on devices that report constrained memory.
+                // The alpha is retained so trailer playback still has a readable backdrop.
+                compositingStrategy = if (reduceHomeEffects) {
+                    CompositingStrategy.Auto
+                } else {
+                    CompositingStrategy.Offscreen
+                }
+                alpha = 1f - transitionProgressState.value
+            }
+        if (reduceHomeEffects) {
             AsyncImage(
-                model = model,
+                model = imageModel,
                 contentDescription = null,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        compositingStrategy = CompositingStrategy.Offscreen
-                        alpha = 1f - transitionProgressState.value
-                    },
+                modifier = backdropModifier,
                 contentScale = ContentScale.Crop,
                 alignment = Alignment.TopEnd
             )
+        } else {
+            androidx.compose.animation.Crossfade(
+                targetState = imageModel,
+                animationSpec = tween(durationMillis = NuvioMotion.tokens.durations.overlay),
+                label = "heroBackdropCrossfade"
+            ) { model ->
+                AsyncImage(
+                    model = model,
+                    contentDescription = null,
+                    modifier = backdropModifier,
+                    contentScale = ContentScale.Crop,
+                    alignment = Alignment.TopEnd
+                )
+            }
         }
         if (shouldPlay) {
             val trailerUrlVal = heroTrailerUrl()
@@ -213,10 +243,15 @@ internal fun ModernHeroGradientLayer(
     modifier: Modifier
 ) {
     val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val reduceHomeEffects = rememberReduceHomeEffects()
     Box(
         modifier = modifier
             .graphicsLayer {
-                compositingStrategy = CompositingStrategy.Offscreen
+                compositingStrategy = if (reduceHomeEffects) {
+                    CompositingStrategy.Auto
+                } else {
+                    CompositingStrategy.Offscreen
+                }
                 alpha = if (isTrailerPlayingFullScreen()) 0f else 1f
             }
             .drawWithCache {
@@ -351,6 +386,7 @@ private fun HeroTitleContent(
     val metaSpacing = NuvioTheme.spacing.sm * metaScale
     val imdbMetaSpacing = NuvioTheme.spacing.xs * metaScale
     val context = LocalContext.current
+    val reduceHomeEffects = rememberReduceHomeEffects()
     val density = LocalDensity.current
     val headlineLarge = MaterialTheme.typography.headlineLarge
     val labelMedium = MaterialTheme.typography.labelMedium
@@ -358,11 +394,17 @@ private fun HeroTitleContent(
     val logoMaxWidthPx = remember(density) { with(density) { 220.dp.roundToPx() } }
     val logoHeightPx = remember(density) { with(density) { 100.dp.roundToPx() } }
 
-    val logoModel = remember(context, preview.logo, logoMaxWidthPx, logoHeightPx) {
+    val logoModel = remember(
+        context,
+        preview.logo,
+        logoMaxWidthPx,
+        logoHeightPx,
+        reduceHomeEffects
+    ) {
         preview.logo?.let {
             ImageRequest.Builder(context)
                 .data(it)
-                .crossfade(true)
+                .crossfade(!reduceHomeEffects)
                 .size(width = logoMaxWidthPx, height = logoHeightPx)
                 .build()
         }

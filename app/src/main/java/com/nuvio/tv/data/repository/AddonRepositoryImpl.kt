@@ -32,6 +32,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import com.nuvio.tv.core.auth.AuthManager
 import com.nuvio.tv.core.sync.AddonSyncService
 import javax.inject.Inject
@@ -84,9 +86,19 @@ class AddonRepositoryImpl(
         private const val LEGACY_MANIFEST_CACHE_KEY = "manifests"
         private const val MANIFEST_SUFFIX = "/manifest.json"
         private const val MANIFEST_CACHE_TTL_MS = 6 * 60 * 60 * 1000L 
+        /**
+         * Keep addon manifest refreshes concurrent enough for a responsive list without creating
+         * an unbounded burst of sockets, response parsing and cache writes on TV hardware.
+         */
+        internal const val MANIFEST_FETCH_CONCURRENCY = 3
     }
 
     private val syncScope = CoroutineScope(SupervisorJob() + dispatcher)
+    /**
+     * Shared by cache-miss loads, stale background refreshes and direct addon refreshes. The
+     * limiter lives at the actual HTTP call so separate batches cannot exceed the same budget.
+     */
+    private val manifestRequestSemaphore = Semaphore(MANIFEST_FETCH_CONCURRENCY)
     private var syncJob: Job? = null
     var isSyncingFromRemote = false
 
@@ -170,11 +182,7 @@ class AddonRepositoryImpl(
             if (!isCacheStale()) return
             lastManifestRefreshAttemptTime = clock()
             manifestRefreshJob = syncScope.launch {
-                val refreshed = urls.map { url ->
-                    async {
-                        fetchAddon(url)
-                    }
-                }.awaitAll()
+                val refreshed = fetchAddonsInOrder(urls) { url -> fetchAddon(url) }
                 // isCacheStale() is re-evaluated every time installedAddonsFlow's combine emits -
                 // on any addon add, remove, rename, enable or disable, and on any manifest cache
                 // mutation - so leaving the clock unset after a failed sweep makes each of those
@@ -255,30 +263,26 @@ class AddonRepositoryImpl(
                     (enabledByUrl[canonical] ?: true) && getCachedManifest(canonical) == null
                 }
                 if (hasCacheMiss) {
-                    val fresh = coroutineScope {
-                        urls.map { url ->
-                            async {
-                                val canonical = canonicalizeUrl(url)
-                                val enabled = enabledByUrl[canonical] ?: true
-                                if (!enabled) {
-                                    return@async getCachedManifest(canonical)
-                                        ?.copy(enabled = false)
-                                        ?: placeholderAddon(canonical, userNames, enabled = false)
-                                }
-                                // On failure fall back to a placeholder rather than null. Returning
-                                // null drops the addon from the emitted list entirely, so an installed
-                                // URL whose manifest has never been fetched successfully becomes
-                                // invisible in the addon manager - and unremovable, because removal is
-                                // driven by the listed row. The disabled branch above already does this.
-                                // A placeholder carries no resources or catalogs, so it is not queried
-                                // for streams and contributes no catalog rows until a real manifest
-                                // arrives.
-                                (getCachedManifest(canonical) ?: when (val result = fetchAddon(url)) {
-                                    is NetworkResult.Success -> result.data
-                                    else -> placeholderAddon(canonical, userNames, enabled)
-                                }).copy(enabled = enabled)
-                            }
-                        }.awaitAll()
+                    val fresh = fetchAddonsInOrder(urls) { url ->
+                        val canonical = canonicalizeUrl(url)
+                        val enabled = enabledByUrl[canonical] ?: true
+                        if (!enabled) {
+                            return@fetchAddonsInOrder getCachedManifest(canonical)
+                                ?.copy(enabled = false)
+                                ?: placeholderAddon(canonical, userNames, enabled = false)
+                        }
+                        // On failure fall back to a placeholder rather than null. Returning
+                        // null drops the addon from the emitted list entirely, so an installed
+                        // URL whose manifest has never been fetched successfully becomes
+                        // invisible in the addon manager - and unremovable, because removal is
+                        // driven by the listed row. The disabled branch above already does this.
+                        // A placeholder carries no resources or catalogs, so it is not queried
+                        // for streams and contributes no catalog rows until a real manifest
+                        // arrives.
+                        (getCachedManifest(canonical) ?: when (val result = fetchAddon(url)) {
+                            is NetworkResult.Success -> result.data
+                            else -> placeholderAddon(canonical, userNames, enabled)
+                        }).copy(enabled = enabled)
                     }
 
                     if (fresh != cached) {
@@ -302,19 +306,21 @@ class AddonRepositoryImpl(
         val baseQuery = if (queryStart >= 0) cleanBaseUrl.substring(queryStart) else ""
         val manifestUrl = "$basePath/manifest.json$baseQuery"
 
-        return when (val result = safeApiCall(context) { api.getManifest(manifestUrl) }) {
-            is NetworkResult.Success -> {
-                val addon = result.data.toDomain(cleanBaseUrl)
-                if (putCachedManifestIfChanged(cleanBaseUrl, addon)) {
-                    Log.d(TAG, "Updated addon manifest cache url=$cleanBaseUrl version=${addon.version} configVersion=${addon.configVersion}")
+        return manifestRequestSemaphore.withPermit {
+            when (val result = safeApiCall(context) { api.getManifest(manifestUrl) }) {
+                is NetworkResult.Success -> {
+                    val addon = result.data.toDomain(cleanBaseUrl)
+                    if (putCachedManifestIfChanged(cleanBaseUrl, addon)) {
+                        Log.d(TAG, "Updated addon manifest cache url=$cleanBaseUrl version=${addon.version} configVersion=${addon.configVersion}")
+                    }
+                    NetworkResult.Success(addon)
                 }
-                NetworkResult.Success(addon)
+                is NetworkResult.Error -> {
+                    Log.w(TAG, "Failed to fetch addon manifest for url=$manifestUrl code=${result.code} message=${result.message}")
+                    result
+                }
+                NetworkResult.Loading -> NetworkResult.Loading
             }
-            is NetworkResult.Error -> {
-                Log.w(TAG, "Failed to fetch addon manifest for url=$manifestUrl code=${result.code} message=${result.message}")
-                result
-            }
-            NetworkResult.Loading -> NetworkResult.Loading
         }
     }
 
@@ -350,15 +356,22 @@ class AddonRepositoryImpl(
 
     suspend fun reconcileWithRemoteAddonUrls(
         remoteUrls: List<String>,
-        removeMissingLocal: Boolean = true
+        removeMissingLocal: Boolean = true,
+        profileId: Int? = null,
+        canApply: () -> Boolean = { true }
     ) {
+        if (!canApply()) return
         val normalizedRemote = remoteUrls
             .map { canonicalizeUrl(it) }
             .filter { it.isNotBlank() }
             .distinctBy { normalizeUrl(it) }
         val remoteSet = normalizedRemote.map { normalizeUrl(it) }.toSet()
 
-        val initialLocalUrls = preferences.installedAddonUrls.first()
+        val initialLocalUrls = if (profileId == null) {
+            preferences.installedAddonUrls.first()
+        } else {
+            preferences.getInstalledAddonUrls(profileId)
+        }
         val initialLocalSet = initialLocalUrls.map { normalizeUrl(it) }.toSet()
         val shouldRemoveMissingLocal = if (removeMissingLocal && normalizedRemote.isEmpty() && initialLocalUrls.isNotEmpty()) {
             Log.w(
@@ -390,6 +403,7 @@ class AddonRepositoryImpl(
         }
 
         if (shouldRemoveMissingLocal) {
+            if (!canApply()) return
             val removedAny = initialLocalUrls
                 .filter { normalizeUrl(it) !in remoteSet }
                 .map { canonicalizeUrl(it) }
@@ -402,9 +416,30 @@ class AddonRepositoryImpl(
 
 
         val currentCanonical = initialLocalUrls.map { canonicalizeUrl(it) }
-        if (finalList != currentCanonical) {
-            preferences.setAddonOrder(finalList)
+        if (finalList != currentCanonical && canApply()) {
+            preferences.setAddonOrder(finalList, profileId)
         }
+    }
+
+    /**
+     * Starts manifest work in input order and returns results in that same order. Request
+     * concurrency is deliberately enforced in [fetchAddon], rather than here, because background
+     * refresh and cache-miss batches can overlap.
+     *
+     * awaitAll retains the order of urls, so addon order and progressive cache fallback remain
+     * stable even when a later URL responds first. Cancellation still propagates through the
+     * child request and releases the repository-wide permit in fetchAddon.
+     */
+    private suspend fun <T> fetchAddonsInOrder(
+        urls: List<String>,
+        fetch: suspend (String) -> T
+    ): List<T> = coroutineScope {
+        if (urls.isEmpty()) return@coroutineScope emptyList()
+        urls.map { url ->
+            async {
+                fetch(url)
+            }
+        }.awaitAll()
     }
 
     private fun placeholderAddon(

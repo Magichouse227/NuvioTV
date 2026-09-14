@@ -50,6 +50,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -303,6 +304,13 @@ class HomeViewModel @Inject constructor(
     internal val startupStartedAtMs: Long = SystemClock.elapsedRealtime()
     @Volatile
     internal var startupGracePeriodActive: Boolean = true
+    /**
+     * Rich TMDB/catalog presentation is intentionally held until the startup coordinator sees a
+     * first interaction (or its bounded fallback). The production default is deliberately closed:
+     * a missing readiness signal must never silently re-enable cold-start enrichment.
+     */
+    internal val startupEnrichmentAllowed = MutableStateFlow(false)
+    internal var startupGraceMinimumElapsed = false
     internal var startupAuthNoticeJob: Job? = null
 
     // Lazy catalog loading
@@ -345,7 +353,22 @@ class HomeViewModel @Inject constructor(
 
         observeStartupAuthNotice()
         viewModelScope.launch {
-            profileManager.activeProfileReady.first { it }
+            val initialProfileIdentity = profileManager.activeProfileIdentity.filterNotNull().first()
+            _uiState.update { it.copy(contentProfileId = initialProfileIdentity.id) }
+            // Install this gate before starting the CW/catalog observers: some of them can
+            // immediately reach remote metadata work from a warm local DataStore emission.
+            val deferredWorkFlow = startupSyncService.startupWorkReleased
+            startupEnrichmentAllowed.value = deferredWorkFlow.value
+            viewModelScope.launch {
+                deferredWorkFlow.collect { released ->
+                    startupEnrichmentAllowed.value = released
+                    releaseStartupGraceIfEligible()
+                    if (released) {
+                        // Revisit local rows once it is safe to perform optional enrichment.
+                        scheduleUpdateCatalogRows()
+                    }
+                }
+            }
             observeLayoutPreferences()
             observeModernHomePresentation()
             loadContinueWatching()
@@ -366,13 +389,40 @@ class HomeViewModel @Inject constructor(
             observeManualAddonRefresh()
 
             // Clear CW state when profile changes so items don't leak between profiles.
-            var previousProfileId = profileManager.activeProfileId.value
-            profileManager.activeProfileId.collect { newId ->
+            var previousProfileId = initialProfileIdentity.id
+            profileManager.activeProfileIdentity.filterNotNull().collect { identity ->
+                val newId = identity.id
                 if (newId != previousProfileId) {
                     previousProfileId = newId
                     // Cancel old pipeline — prevents racing writes from stale coroutines.
                     cwPipelineJob?.cancel()
                     cwPipelineJob = null
+                    cancelInFlightCatalogLoads()
+                    // Advance the generation before clearing state. A source that ignores
+                    // cancellation cannot publish its old profile's catalog into the new shell.
+                    catalogLoadGeneration += 1
+                    activeCatalogLoadSignature = null
+                    catalogsLoadInProgress = false
+                    pendingCatalogLoads = 0
+                    catalogUpdateJob?.cancel()
+                    heroEnrichmentJob?.cancel()
+                    externalMetaPrefetchJob?.cancel()
+                    tmdbEnrichFocusJob?.cancel()
+                    adjacentItemPrefetchJob?.cancel()
+                    trailerPreviewJob?.cancel()
+                    posterStatusReconcileJob?.cancel()
+                    movieWatchedBatchJob?.cancel()
+                    movieWatchedObserverJobs.values.forEach { it.cancel() }
+                    movieWatchedObserverJobs.clear()
+                    seriesWatchedObserverJob?.cancel()
+                    synchronized(catalogStateLock) {
+                        catalogOrder.clear()
+                    }
+                    clearCatalogData()
+                    _fullCatalogRows.value = emptyList()
+                    _modernHomePresentation.value = ModernHomePresentationState()
+                    addonsCache = emptyList()
+                    collectionsCache = emptyList()
                     // Clear all in-memory CW caches so data from the previous
                     // profile doesn't leak into the new one.
                     cwMetaCache.clear()
@@ -390,7 +440,19 @@ class HomeViewModel @Inject constructor(
                     cwLastBadgeEpisodeKeys = emptySet()
                     cwLastShowIdSiblings = emptyMap()
                     _uiState.update {
-                        it.copy(layoutPreferencesReady = false, continueWatchingItems = emptyList())
+                        it.copy(
+                            contentProfileId = newId,
+                            layoutPreferencesReady = false,
+                            catalogRows = emptyList(),
+                            continueWatchingItems = emptyList(),
+                            upcomingItems = emptyList(),
+                            heroItems = emptyList(),
+                            homeRows = emptyList(),
+                            gridItems = emptyList(),
+                            installedAddonsCount = 0,
+                            error = null,
+                            modernHomePresentation = ModernHomePresentationState()
+                        )
                     }
                     clearFocusState()
                     _gridFocusState.value = HomeScreenFocusState()
@@ -408,12 +470,8 @@ class HomeViewModel @Inject constructor(
         }
         viewModelScope.launch {
             delay(STARTUP_GRACE_PERIOD_MS)
-            startupGracePeriodActive = false
-            // Trigger enrichment for the initial focused item once grace ends.
-            deferredEnrichItem?.let { item ->
-                deferredEnrichItem = null
-                onItemFocusPipeline(item)
-            }
+            startupGraceMinimumElapsed = true
+            releaseStartupGraceIfEligible()
         }
 
         // Observe manual cache clear from Advanced settings.
@@ -452,6 +510,18 @@ class HomeViewModel @Inject constructor(
     internal fun remainingStartupGraceMs(nowMs: Long = SystemClock.elapsedRealtime()): Long {
         if (!startupGracePeriodActive) return 0L
         return (STARTUP_GRACE_PERIOD_MS - (nowMs - startupStartedAtMs)).coerceAtLeast(0L)
+    }
+
+    private fun releaseStartupGraceIfEligible() {
+        if (!startupGraceMinimumElapsed || !startupEnrichmentAllowed.value || !startupGracePeriodActive) {
+            return
+        }
+        startupGracePeriodActive = false
+        // Trigger enrichment for the initial focused item only once deferred startup work is safe.
+        deferredEnrichItem?.let { item ->
+            deferredEnrichItem = null
+            onItemFocusPipeline(item)
+        }
     }
 
     internal fun remainingContinueWatchingEnrichmentGraceMs(
@@ -818,6 +888,7 @@ class HomeViewModel @Inject constructor(
 
     internal fun scheduleUpdateCatalogRows() {
         catalogUpdateJob?.cancel()
+        val generation = catalogLoadGeneration
         catalogUpdateJob = viewModelScope.launch {
             val debounceMs = when {
                 // First render: use a moderate debounce so near-simultaneous
@@ -834,7 +905,7 @@ class HomeViewModel @Inject constructor(
                 else -> 80L
             }
             delay(debounceMs)
-            updateCatalogRows()
+            updateCatalogRows(generation)
         }
     }
 
@@ -881,7 +952,7 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    private suspend fun updateCatalogRows() = updateCatalogRowsPipeline()
+    private suspend fun updateCatalogRows(generation: Long) = updateCatalogRowsPipeline(generation)
 
     internal var posterStatusReconcileJob: Job? = null
 

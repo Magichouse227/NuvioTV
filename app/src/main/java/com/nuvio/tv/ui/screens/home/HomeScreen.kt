@@ -55,6 +55,7 @@ import com.nuvio.tv.ui.components.LoadingIndicator
 import com.nuvio.tv.ui.components.LocalStartupLoadingState
 import com.nuvio.tv.ui.components.LocalStartupSplashEnabled
 import com.nuvio.tv.ui.components.shouldShowHomeStartupLoader
+import com.nuvio.tv.ui.components.canRenderCachedHomeShell
 import com.nuvio.tv.ui.components.NuvioDialog
 import com.nuvio.tv.ui.components.PosterCardDefaults
 import com.nuvio.tv.ui.components.PosterCardStyle
@@ -63,6 +64,7 @@ import com.nuvio.tv.R
 import com.nuvio.tv.core.tracking.LOCAL_LIBRARY_LIST_KEY
 import com.nuvio.tv.core.tracking.supportsMembershipFor
 import com.nuvio.tv.data.local.StartupAuthNotice
+import com.nuvio.tv.core.startup.StartupTimingMarkers
 import com.nuvio.tv.ui.components.posteroptions.TrackingRemovalConfirmationDialog
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -98,6 +100,8 @@ fun HomeScreen(
     onNavigateToFolderDetail: (String, String) -> Unit = { _, _ -> }
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val activeProfileIdentity by viewModel.profileManager.activeProfileIdentity.collectAsStateWithLifecycle()
+    val activeProfileId = activeProfileIdentity?.id
 
     // Home was the only major screen without a lifecycle observer, so nothing ever told it to
     // look at its catalogs again.
@@ -120,22 +124,43 @@ fun HomeScreen(
     val hasCatalogContent = uiState.catalogRows.any { it.items.isNotEmpty() }
     val hasCollectionContent = uiState.homeRows.any { it is HomeRow.CollectionRow }
     val hasHeroContent = uiState.heroItems.isNotEmpty()
+    val hasCachedShellContent = uiState.homeRows.isNotEmpty() ||
+        uiState.catalogRows.isNotEmpty() ||
+        (uiState.continueWatchingEnabled && uiState.continueWatchingItems.isNotEmpty()) ||
+        uiState.heroItems.isNotEmpty()
+    val cachedHomeShellReady = canRenderCachedHomeShell(
+        activeProfileReady = activeProfileIdentity != null,
+        activeProfileId = activeProfileId,
+        cachedContentProfileId = uiState.contentProfileId,
+        layoutPreferencesReady = uiState.layoutPreferencesReady,
+        hasCachedShellContent = hasCachedShellContent
+    )
     val modernPresentationReady =
         uiState.homeLayout != HomeLayout.MODERN ||
             modernPresentation.rows.list.isNotEmpty() ||
-            (uiState.heroSectionEnabled && hasHeroContent && !hasCatalogContent && !hasCollectionContent)
-    var showHomeContentWithAnimation by rememberSaveable { mutableStateOf(false) }
-    var hasShownInitialHomeContent by rememberSaveable { mutableStateOf(false) }
+            (uiState.heroSectionEnabled && hasHeroContent && !hasCatalogContent && !hasCollectionContent) ||
+            cachedHomeShellReady
+    val profileContentMatches = activeProfileId != null &&
+        uiState.contentProfileId == activeProfileId
+    // These gates are presentation state for one profile only. Never retain a released gate,
+    // animation, or timeout across an identity transition.
+    var showHomeContentWithAnimation by rememberSaveable(activeProfileId) { mutableStateOf(false) }
+    var hasShownInitialHomeContent by rememberSaveable(activeProfileId) { mutableStateOf(false) }
     // Once we've shown stable home content, never go back to loading gate.
-    var homeStableGateReleased by rememberSaveable { mutableStateOf(false) }
+    var homeStableGateReleased by rememberSaveable(activeProfileId) { mutableStateOf(false) }
     // Track that catalog loading has started at least once (isLoading went true→false).
-    var catalogLoadingStarted by rememberSaveable { mutableStateOf(false) }
-    var posterOptionsTarget by remember { mutableStateOf<HomePosterOptionsTarget?>(null) }
+    var catalogLoadingStarted by rememberSaveable(activeProfileId) { mutableStateOf(false) }
+    var posterOptionsTarget by remember(activeProfileId) { mutableStateOf<HomePosterOptionsTarget?>(null) }
 
     LaunchedEffect(uiState.homeLayout) {
         if (uiState.homeLayout != HomeLayout.MODERN) {
             HeroBackdropState.update(null)
         }
+    }
+    LaunchedEffect(activeProfileId) {
+        // The hero scene/backdrop is profile-derived presentation state. Do not retain its
+        // artwork while the newly active profile is still establishing its own shell.
+        HeroBackdropState.update(null)
     }
 
     // Notify ViewModel of locale changes after activity recreation
@@ -176,15 +201,20 @@ fun HomeScreen(
         hasCollectionContent,
         hasHeroContent,
         initialCwResolved,
-        modernPresentationReady
+        modernPresentationReady,
+        cachedHomeShellReady,
+        profileContentMatches
     ) {
+        if (!profileContentMatches) return@LaunchedEffect
         // Track that addons are known (even if isLoading flipped too fast to catch).
         if (uiState.installedAddonsCount > 0) {
             catalogLoadingStarted = true
         }
         // Wait until catalog loading has completed with content AND the CW
         // pipeline has completed its first emission.
-        if (!homeStableGateReleased &&
+        if (cachedHomeShellReady) {
+            homeStableGateReleased = true
+        } else if (!homeStableGateReleased &&
             catalogLoadingStarted &&
             !uiState.isLoading &&
             initialCwResolved &&
@@ -197,7 +227,15 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(cachedHomeShellReady, profileContentMatches) {
+        if (profileContentMatches && cachedHomeShellReady) {
+            StartupTimingMarkers.markHomeShellReady()
+            viewModel.startupSyncService.onHomeShellReady()
+        }
+    }
+
+    LaunchedEffect(activeProfileId, profileContentMatches) {
+        if (!profileContentMatches) return@LaunchedEffect
         // Safety timeout — if catalogs and CW haven't loaded within this
         // window, show whatever is available.  Covers edge cases like
         // clean cache (addons loading from remote sync) and users with
@@ -228,9 +266,11 @@ fun HomeScreen(
     val hasAnyContent = uiState.catalogRows.isNotEmpty() ||
         (uiState.continueWatchingEnabled && uiState.continueWatchingItems.isNotEmpty()) ||
         uiState.heroItems.isNotEmpty() ||
-        hasCollectionContent
+        hasCollectionContent ||
+        uiState.homeRows.isNotEmpty()
     val showStartupLoader = when {
-        !uiState.layoutPreferencesReady -> true
+        !profileContentMatches || !uiState.layoutPreferencesReady -> true
+        cachedHomeShellReady -> false
         uiState.isLoading && !hasAnyContent -> true
         uiState.error == noAddonsError && uiState.catalogRows.isEmpty() -> !homeStableGateReleased
         uiState.error == noCatalogAddonsError && uiState.catalogRows.isEmpty() && !hasCollectionContent && !hasHeroContent -> !homeStableGateReleased
@@ -258,6 +298,12 @@ fun HomeScreen(
         modifier = Modifier.fillMaxSize()
     ) {
         when {
+            !profileContentMatches -> {
+                // A profile change can arrive between old pipeline cancellation and the first
+                // new DataStore emission. Do not draw any retained rows in that interval.
+                Unit
+            }
+
             !uiState.layoutPreferencesReady -> {
                 Unit
             }

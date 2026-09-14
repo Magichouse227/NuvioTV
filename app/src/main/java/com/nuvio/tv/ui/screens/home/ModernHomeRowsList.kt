@@ -1,5 +1,7 @@
 package com.nuvio.tv.ui.screens.home
 
+import androidx.compose.runtime.collectAsState
+import com.nuvio.tv.data.local.imagePerformancePreferences
 import com.nuvio.tv.ui.theme.NuvioTheme
 
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -162,11 +164,16 @@ internal fun ModernHomeRowsList(
     val layoutDirection = LocalLayoutDirection.current
     val verticalPrefetchImageLoader = context.imageLoader
     val latestCarouselRowsForImagePrefetch = rememberUpdatedState(carouselRows)
+    val reduceHomeEffectsPreferences = remember(context) {
+        imagePerformancePreferences(context)
+    }
+    val reduceHomeEffects by reduceHomeEffectsPreferences.reduceHomeEffectsFlow.collectAsState()
 
     LaunchedEffect(
         verticalPrefetchImageLoader,
         verticalRowListState,
         density,
+        reduceHomeEffects,
         useLandscapePosters,
         effectiveExpandEnabled,
         portraitCatalogCardWidth,
@@ -174,8 +181,8 @@ internal fun ModernHomeRowsList(
         landscapeCatalogCardWidth,
         landscapeCatalogCardHeight
     ) {
-        val prefetchAheadRows = 1
-        val prefetchItemsPerRow = 1
+        val prefetchAheadRows = if (reduceHomeEffects) 0 else 1
+        val prefetchItemsPerRow = if (reduceHomeEffects) 0 else 1
         snapshotFlow {
             verticalRowListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
         }
@@ -183,9 +190,10 @@ internal fun ModernHomeRowsList(
             .debounce(240L) // VERTICAL_PREFETCH_DEBOUNCE_MS
             .collect { lastVisibleRowIndex ->
                 withContext(Dispatchers.IO) {
-                    for (rowOffset in 1..prefetchAheadRows) {
+                    repeat(prefetchAheadRows) { offset ->
+                        val rowOffset = offset + 1
                         val row = latestCarouselRowsForImagePrefetch.value.list
-                            .getOrNull(lastVisibleRowIndex + rowOffset) ?: continue
+                            .getOrNull(lastVisibleRowIndex + rowOffset) ?: return@repeat
                         for (i in 0 until minOf(prefetchItemsPerRow, row.items.list.size)) {
                             val item = row.items.list[i]
                             val url = item.imageUrl ?: continue
@@ -217,8 +225,11 @@ internal fun ModernHomeRowsList(
 
     val latestOnRequestLazyCatalogLoad = rememberUpdatedState(onRequestLazyCatalogLoad)
     val latestCarouselRowsForLazy = rememberUpdatedState(carouselRows)
-    LaunchedEffect(verticalRowListState) {
-        val prefetchAheadForLazy = 2
+    LaunchedEffect(verticalRowListState, reduceHomeEffects) {
+        // Loading only visible rows in reduced-effects mode avoids starting network/catalog work
+        // for content the user may never reach. Focus and scroll restoration still use the same
+        // LazyListState and item keys.
+        val prefetchAheadForLazy = if (reduceHomeEffects) 0 else 2
         snapshotFlow {
             val info = verticalRowListState.layoutInfo
             val firstVisible = info.visibleItemsInfo.firstOrNull()?.index ?: -1

@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -98,6 +99,7 @@ import coil3.request.CachePolicy
 import coil3.request.crossfade
 import coil3.request.transformations
 import com.nuvio.tv.R
+import com.nuvio.tv.data.local.imagePerformancePreferences
 import com.nuvio.tv.domain.model.FocusedPosterTrailerPlaybackTarget
 import com.nuvio.tv.domain.model.CardDepthSurface
 import com.nuvio.tv.domain.model.MetaPreview
@@ -633,6 +635,10 @@ internal fun ModernRowSection(
         val rowStartPadding = 52.dp
         val context = LocalContext.current
         val imageLoader = context.imageLoader
+        val reduceHomeEffectsPreferences = remember(context) {
+            imagePerformancePreferences(context)
+        }
+        val reduceHomeEffects by reduceHomeEffectsPreferences.reduceHomeEffectsFlow.collectAsState()
 
         val rowItemCount = row.items.list.size
         LaunchedEffect(
@@ -647,9 +653,12 @@ internal fun ModernRowSection(
             continueWatchingCardWidth,
             continueWatchingCardHeight,
             useEpisodeThumbnails,
-            blurUnwatchedEpisodes
+            blurUnwatchedEpisodes,
+            reduceHomeEffects
         ) {
-            if (!isActiveRow() || isVerticalRowsScrollingState.value) return@LaunchedEffect
+            if (reduceHomeEffects || !isActiveRow() || isVerticalRowsScrollingState.value) {
+                return@LaunchedEffect
+            }
             delay(150) // Wait before spamming image requests to survive rapid vertical D-pad scrolls!
             val cwWidthPx = with(density) {
                 continueWatchingArtworkWidth(

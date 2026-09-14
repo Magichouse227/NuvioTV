@@ -25,6 +25,7 @@ import com.nuvio.tv.core.diagnostics.DiagnosticReportStore
 import com.nuvio.tv.core.build.LowRamDevicePolicy
 import com.nuvio.tv.core.image.StaleWhileRevalidateCacheStrategy
 import com.nuvio.tv.core.runtime.PluginRuntimeHooks
+import com.nuvio.tv.core.startup.StartupTimingMarkers
 import com.nuvio.tv.core.sync.StartupSyncService
 import com.nuvio.tv.core.sync.androidtv.AndroidTvChannelSyncService
 import com.nuvio.tv.core.network.IPv4FirstDns
@@ -86,8 +87,14 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
         }
     }
 
+    override fun attachBaseContext(base: Context) {
+        StartupTimingMarkers.initializeProcessStart()
+        super.attachBaseContext(base)
+    }
+
     override fun onCreate() {
         super.onCreate()
+        StartupTimingMarkers.markApplicationCreated()
         DiagnosticLog.install(diagnosticReportStore)
         diagnosticsScope.launch {
             diagnosticReportStore.initialize()
@@ -97,7 +104,9 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
         // Install last so this wrapper also preserves Sentry's handler when enabled.
         crashReportStore.installUncaughtExceptionHandler()
         PluginRuntimeHooks.onApplicationCreate(this)
-        androidTvChannelSyncService.start()
+        // Channel reconciliation observes several DataStores and is not needed to draw the
+        // app. StartupSyncService starts it after the first interaction (or its bounded
+        // fallback), rather than competing with the first frame.
         // Load locale synchronously so it's available before Activity.attachBaseContext.
         // SharedPreferences reads are fast (cached in memory after first access).
         val tag = getSharedPreferences("app_locale", Context.MODE_PRIVATE)
@@ -182,7 +191,7 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
             .crossfade(false)
             .precision(coil3.size.Precision.INEXACT)
             .allowHardware(false)
-            .allowRgb565(lowRamDevice || imagePerformancePreferences.rgb565Enabled)
+            .allowRgb565(imagePerformancePreferences.rgb565Enabled)
             .bitmapFactoryMaxParallelism(if (lowRamDevice) 1 else 4)
             .build()
     }

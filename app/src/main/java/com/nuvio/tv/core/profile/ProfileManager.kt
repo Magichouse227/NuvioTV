@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import java.io.File
@@ -32,11 +33,24 @@ class ProfileManager @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val activeProfileId: StateFlow<Int> = profileDataStore.activeProfileId
+    /**
+     * The active profile is unavailable until its DataStore emission arrives. Consumers that
+     * render profile-scoped data must use this value rather than pairing [activeProfileId] with a
+     * separately scheduled readiness flag, which can temporarily pair readiness with id 1.
+     */
+    data class ActiveProfileIdentity(val id: Int)
+
+    val activeProfileIdentity: StateFlow<ActiveProfileIdentity?> = profileDataStore.activeProfileId
+        .map { ActiveProfileIdentity(it) }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
+    val activeProfileId: StateFlow<Int> = activeProfileIdentity
+        .filterNotNull()
+        .map { it.id }
         .stateIn(scope, SharingStarted.Eagerly, 1)
 
-    val activeProfileReady: StateFlow<Boolean> = profileDataStore.activeProfileId
-        .map { true }
+    val activeProfileReady: StateFlow<Boolean> = activeProfileIdentity
+        .map { it != null }
         .stateIn(scope, SharingStarted.Eagerly, false)
 
     val hasEverSelectedProfile: StateFlow<Boolean> = profileDataStore.hasEverSelectedProfile

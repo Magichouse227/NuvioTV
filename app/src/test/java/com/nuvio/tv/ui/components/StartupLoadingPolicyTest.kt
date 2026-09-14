@@ -74,6 +74,50 @@ class StartupLoadingPolicyTest {
         }
     }
 
+    @Test
+    fun `cached home shell waits for the active profile and layout preferences`() {
+        assertFalse(
+            canRenderCachedHomeShell(
+                activeProfileReady = false,
+                activeProfileId = 2,
+                cachedContentProfileId = 2,
+                layoutPreferencesReady = true,
+                hasCachedShellContent = true
+            )
+        )
+        assertFalse(
+            canRenderCachedHomeShell(
+                activeProfileReady = true,
+                activeProfileId = 2,
+                cachedContentProfileId = 2,
+                layoutPreferencesReady = false,
+                hasCachedShellContent = true
+            )
+        )
+        assertTrue(
+            canRenderCachedHomeShell(
+                activeProfileReady = true,
+                activeProfileId = 2,
+                cachedContentProfileId = 2,
+                layoutPreferencesReady = true,
+                hasCachedShellContent = true
+            )
+        )
+    }
+
+    @Test
+    fun `cached shell from another profile stays covered during a profile switch`() {
+        assertFalse(
+            canRenderCachedHomeShell(
+                activeProfileReady = true,
+                activeProfileId = 2,
+                cachedContentProfileId = 1,
+                layoutPreferencesReady = true,
+                hasCachedShellContent = true
+            )
+        )
+    }
+
     private fun show(destination: StartupDestination, complete: Boolean = false): Boolean =
         shouldShowStartupSplash(true, complete, destination)
 }

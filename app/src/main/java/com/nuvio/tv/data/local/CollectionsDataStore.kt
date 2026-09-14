@@ -62,8 +62,8 @@ class CollectionsDataStore @Inject constructor(
             }
         }
 
-    suspend fun setCollections(collections: List<Collection>) {
-        store().edit { prefs ->
+    suspend fun setCollections(collections: List<Collection>, profileId: Int? = null) {
+        store(profileId ?: profileManager.activeProfileId.value).edit { prefs ->
             if (collections.isEmpty()) {
                 prefs.remove(collectionsKey)
             } else {
@@ -113,13 +113,13 @@ class CollectionsDataStore @Inject constructor(
         return parseCollections(json)
     }
 
-    suspend fun getCurrentCollections(): List<Collection> {
-        val prefs = store().data.first()
+    suspend fun getCurrentCollections(profileId: Int? = null): List<Collection> {
+        val prefs = store(profileId ?: profileManager.activeProfileId.value).data.first()
         return parseCollections(prefs[collectionsKey])
     }
 
-    suspend fun exportCurrentProfileJson(): String? {
-        val prefs = store().data.first()
+    suspend fun exportCurrentProfileJson(profileId: Int? = null): String? {
+        val prefs = store(profileId ?: profileManager.activeProfileId.value).data.first()
         return prefs[collectionsKey]
     }
 

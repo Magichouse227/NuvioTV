@@ -488,8 +488,10 @@ class PluginManager @Inject constructor(
      */
     suspend fun reconcileWithRemoteRepoUrls(
         remotePlugins: List<RemotePluginInfo>,
-        removeMissingLocal: Boolean = true
+        removeMissingLocal: Boolean = true,
+        canApply: () -> Boolean = { true }
     ) = reconcileMutex.withLock {
+        if (!canApply()) return@withLock
         val normalizedRemote = remotePlugins
             .map { it.copy(url = canonicalizeRepoUrl(it.url)) }
             .filter { it.url.isNotEmpty() }
@@ -512,12 +514,14 @@ class PluginManager @Inject constructor(
             initialLocalRepos
                 .filter { normalizeUrl(it.url) !in remoteUrlSet }
                 .forEach { repo ->
+                    if (!canApply()) return@withLock
                     Log.d(TAG, "reconcile: removing local repo not in remote: ${repo.name} (${repo.url})")
                     removeRepository(repo.id)
                 }
         }
 
         normalizedRemote.forEach { remotePlugin ->
+            if (!canApply()) return@withLock
             if (initialLocalByNormalizedUrl[normalizeUrl(remotePlugin.url)] == null) {
                 val typeHint = remotePlugin.repoType?.let {
                     try { RepositoryType.valueOf(it) } catch (_: Exception) { null }
@@ -537,7 +541,7 @@ class PluginManager @Inject constructor(
             .filter { normalizeUrl(it.url) !in remoteUrlSet }
 
         val reordered = if (shouldRemoveMissingLocal) remoteOrderedRepos else remoteOrderedRepos + extras
-        if (reordered.map { it.id } != currentRepos.map { it.id }) {
+        if (reordered.map { it.id } != currentRepos.map { it.id } && canApply()) {
             dataStore.saveRepositories(reordered)
         }
     }
@@ -546,11 +550,13 @@ class PluginManager @Inject constructor(
     @JvmName("reconcileWithRemoteRepoUrlStrings")
     suspend fun reconcileWithRemoteRepoUrls(
         remoteUrls: List<String>,
-        removeMissingLocal: Boolean = true
+        removeMissingLocal: Boolean = true,
+        canApply: () -> Boolean = { true }
     ) {
         reconcileWithRemoteRepoUrls(
             remotePlugins = remoteUrls.map { RemotePluginInfo(url = it) },
-            removeMissingLocal = removeMissingLocal
+            removeMissingLocal = removeMissingLocal,
+            canApply = canApply
         )
     }
     

@@ -54,10 +54,14 @@ class AndroidTvChannelSyncService @Inject constructor(
     // Projectivy from repainting. We instead reconcile once when the app goes to background
     // (user returns to the launcher) — see [onForegroundChanged].
     @Volatile private var appInForeground = false
+    @Volatile private var started = false
 
     /** Called from the host Activity's onStart/onStop. On background we reconcile once so the
      *  channel reflects the latest watch progress exactly as the launcher regains foreground. */
     fun onForegroundChanged(foreground: Boolean) {
+        // Lifecycle transitions before StartupSyncService activates this component must not
+        // reconcile stale cache data during cold start.
+        if (!started) return
         val wasForeground = appInForeground
         appInForeground = foreground
         if (wasForeground && !foreground) {
@@ -67,10 +71,12 @@ class AndroidTvChannelSyncService @Inject constructor(
 
     @OptIn(FlowPreview::class)
     fun start() {
+        if (started) return
         if (!manager.isSupported()) {
             Log.d(TAG, "Non-leanback device; channel sync skipped")
             return
         }
+        started = true
         TvChannelRefreshJobService.schedulePeriodic(context)
 
         scope.launch {

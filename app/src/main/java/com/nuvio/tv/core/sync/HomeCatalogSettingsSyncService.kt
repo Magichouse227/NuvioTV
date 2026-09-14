@@ -10,6 +10,7 @@ import com.nuvio.tv.domain.model.AuthState
 import com.nuvio.tv.domain.model.enabledAddons
 import com.nuvio.tv.domain.repository.AddonRepository
 import io.github.jan.supabase.postgrest.Postgrest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -95,6 +96,8 @@ class HomeCatalogSettingsSyncService @Inject constructor(
     private suspend fun <T> withJwtRefreshRetry(block: suspend () -> T): T {
         return try {
             block()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (!authManager.refreshSessionIfJwtExpired(e)) throw e
             block()
@@ -118,31 +121,37 @@ class HomeCatalogSettingsSyncService @Inject constructor(
         }
     }
 
-    suspend fun pullFromRemote(): Result<Boolean> = withContext(Dispatchers.IO) {
+    suspend fun pullFromRemote(
+        profileId: Int? = profileManager.activeProfileIdentity.value?.id,
+        userId: String? = null
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
-            val profileId = profileManager.activeProfileId.value
-            val syncScope = currentScope(profileId)
+            val resolvedProfileId = profileId ?: return@withContext Result.success(false)
+            val syncScope = currentScope(resolvedProfileId, userId)
                 ?: return@withContext Result.success(false)
-            val localState = layoutPreferenceDataStore.getHomeCatalogSettingsState()
-            Log.d(TAG, "Pull start profile=$profileId ${localState.summary()}")
+            val localState = layoutPreferenceDataStore.getHomeCatalogSettingsState(resolvedProfileId)
+            Log.d(TAG, "Pull start profile=$resolvedProfileId ${localState.summary()}")
 
             if (localState.disabledKeys.any(::hasLegacyHomeCatalogDisabledKeyFormat)) {
-                val localPayload = loadLocalPayload()
+                val localPayload = loadLocalPayload(resolvedProfileId)
                 if (localPayload.items.isNotEmpty()) {
                     isSyncingFromRemote = true
                     try {
-                        layoutPreferenceDataStore.applyCatalogSettingsFromRemote(localPayload)
+                        if (currentScope(resolvedProfileId, userId) == null) {
+                            return@withContext Result.success(false)
+                        }
+                        layoutPreferenceDataStore.applyCatalogSettingsFromRemote(localPayload, resolvedProfileId)
                     } finally {
                         isSyncingFromRemote = false
                     }
-                    Log.i(TAG, "Migrated legacy local keys profile=$profileId ${localPayload.summary()} (no startup push)")
+                    Log.i(TAG, "Migrated legacy local keys profile=$resolvedProfileId ${localPayload.summary()} (no startup push)")
                     return@withContext Result.success(true)
                 }
             }
 
-            val localPayload = loadLocalPayload()
-            val remoteBlob = fetchRemoteBlob(profileId)
-            if (currentScope(profileId) != syncScope) {
+            val localPayload = loadLocalPayload(resolvedProfileId)
+            val remoteBlob = fetchRemoteBlob(resolvedProfileId)
+            if (currentScope(resolvedProfileId, userId) != syncScope) {
                 return@withContext Result.success(false)
             }
             cachedSharedSettings = CachedSharedSettings(
@@ -150,31 +159,36 @@ class HomeCatalogSettingsSyncService @Inject constructor(
                 settingsJson = remoteBlob?.settingsJson ?: buildJsonObject { }
             )
             if (remoteBlob == null) {
-                Log.d(TAG, "No remote row profile=$profileId; preserving local (startup is pull-only)")
+                Log.d(TAG, "No remote row profile=$resolvedProfileId; preserving local (startup is pull-only)")
                 return@withContext Result.success(false)
             }
 
             val remotePayload = decodePayloadPreservingLocalDefaults(remoteBlob.settingsJson, localPayload)
             if (remotePayload == null) {
-                Log.w(TAG, "Pull parse failure profile=$profileId")
+                Log.w(TAG, "Pull parse failure profile=$resolvedProfileId")
                 return@withContext Result.success(false)
             }
-            Log.d(TAG, "Pull remote payload profile=$profileId ${remotePayload.summary()}")
+            Log.d(TAG, "Pull remote payload profile=$resolvedProfileId ${remotePayload.summary()}")
 
             if (remotePayload.items.isEmpty()) {
-                Log.d(TAG, "Remote payload empty profile=$profileId; preserving local (startup is pull-only)")
+                Log.d(TAG, "Remote payload empty profile=$resolvedProfileId; preserving local (startup is pull-only)")
                 return@withContext Result.success(false)
             }
 
             isSyncingFromRemote = true
             try {
-                layoutPreferenceDataStore.applyCatalogSettingsFromRemote(remotePayload)
+                if (currentScope(resolvedProfileId, userId) == null) {
+                    return@withContext Result.success(false)
+                }
+                layoutPreferenceDataStore.applyCatalogSettingsFromRemote(remotePayload, resolvedProfileId)
             } finally {
                 isSyncingFromRemote = false
             }
 
-            Log.d(TAG, "Pull apply success profile=$profileId ${remotePayload.summary()}")
+            Log.d(TAG, "Pull apply success profile=$resolvedProfileId ${remotePayload.summary()}")
             Result.success(true)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to pull home catalog settings", e)
             Result.failure(e)
@@ -191,10 +205,10 @@ class HomeCatalogSettingsSyncService @Inject constructor(
         }
     }
 
-    private suspend fun loadLocalPayload(): SyncHomeCatalogPayload {
+    private suspend fun loadLocalPayload(profileId: Int): SyncHomeCatalogPayload {
         val addons = addonRepository.getInstalledAddons().first().enabledAddons()
-        val collections = collectionsDataStore.getCurrentCollections()
-        return layoutPreferenceDataStore.exportCatalogSettingsToSyncPayload(addons, collections)
+        val collections = collectionsDataStore.getCurrentCollections(profileId)
+        return layoutPreferenceDataStore.exportCatalogSettingsToSyncPayload(addons, collections, profileId)
     }
 
     private suspend fun pushPayload(syncScope: HomeCatalogSyncScope, payload: SyncHomeCatalogPayload) {
@@ -249,9 +263,10 @@ class HomeCatalogSettingsSyncService @Inject constructor(
         return mergeHomeCatalogSettingsJson(remoteJson, localJson)
     }
 
-    private fun currentScope(profileId: Int): HomeCatalogSyncScope? {
+    private fun currentScope(profileId: Int, expectedUserId: String? = null): HomeCatalogSyncScope? {
         val state = authManager.authState.value as? AuthState.FullAccount ?: return null
-        if (profileManager.activeProfileId.value != profileId) return null
+        if (expectedUserId != null && state.userId != expectedUserId) return null
+        if (profileManager.activeProfileIdentity.value?.id != profileId) return null
         return HomeCatalogSyncScope(userId = state.userId, profileId = profileId)
     }
 

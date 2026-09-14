@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -168,6 +170,11 @@ class ProfileSelectionViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 profileManager.setActiveProfile(id)
+                // DataStore.edit returning only confirms persistence. Wait for the single atomic
+                // profile identity emission before allowing Home/MainActivity to leave selection.
+                profileManager.activeProfileIdentity
+                    .filterNotNull()
+                    .first { identity -> identity.id == id }
                 onComplete()
             } catch (error: CancellationException) {
                 throw error

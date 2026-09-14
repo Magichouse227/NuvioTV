@@ -815,22 +815,26 @@ class LayoutPreferenceDataStore @Inject constructor(
         }
     }
 
-    internal suspend fun getHomeCatalogSettingsState(): LocalHomeCatalogSettingsState {
-        return readHomeCatalogSettingsState(store().data.first())
+    internal suspend fun getHomeCatalogSettingsState(profileId: Int? = null): LocalHomeCatalogSettingsState {
+        return readHomeCatalogSettingsState(store(profileId ?: profileManager.activeProfileId.value).data.first())
     }
 
     internal suspend fun exportCatalogSettingsToSyncPayload(
         addons: List<Addon>,
-        collections: List<Collection>
+        collections: List<Collection>,
+        profileId: Int? = null
     ): SyncHomeCatalogPayload {
         return buildHomeCatalogSyncPayload(
             addons = addons,
             collections = collections,
-            localState = getHomeCatalogSettingsState()
+            localState = getHomeCatalogSettingsState(profileId)
         )
     }
 
-    suspend fun applyCatalogSettingsFromRemote(payload: SyncHomeCatalogPayload) {
+    suspend fun applyCatalogSettingsFromRemote(
+        payload: SyncHomeCatalogPayload,
+        profileId: Int? = null
+    ) {
         val sortedItems = payload.items.sortedBy { it.order }
         val orderKeys = sortedItems.map { item ->
             if (item.isCollection) homeCollectionKey(item.collectionId)
@@ -846,7 +850,7 @@ class LayoutPreferenceDataStore @Inject constructor(
             key to item.customTitle
         }.filterValues { it.isNotBlank() }
 
-        store().edit { prefs ->
+        store(profileId ?: profileManager.activeProfileId.value).edit { prefs ->
             prefs[hideUnreleasedContentKey] = payload.hideUnreleasedContent
             if (orderKeys.isNotEmpty()) {
                 prefs[homeCatalogOrderKeysKey] = gson.toJson(orderKeys)

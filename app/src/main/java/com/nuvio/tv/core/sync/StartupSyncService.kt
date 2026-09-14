@@ -5,6 +5,11 @@ import android.util.Log
 import com.nuvio.tv.core.auth.AuthManager
 import com.nuvio.tv.core.plugin.PluginManager
 import com.nuvio.tv.core.profile.ProfileManager
+import com.nuvio.tv.core.startup.StartupTimingMarkers
+import com.nuvio.tv.core.startup.StartupWorkReleaseEvent
+import com.nuvio.tv.core.startup.StartupWorkReleaseState
+import com.nuvio.tv.core.startup.transitionStartupWorkRelease
+import com.nuvio.tv.core.sync.androidtv.AndroidTvChannelSyncService
 import com.nuvio.tv.data.local.StartupSyncPreferences
 import com.nuvio.tv.data.local.WatchProgressPreferences
 import com.nuvio.tv.data.repository.AddonRepositoryImpl
@@ -13,6 +18,7 @@ import com.nuvio.tv.data.repository.WatchProgressRepositoryImpl
 import com.nuvio.tv.domain.model.AuthState
 import com.nuvio.tv.domain.model.LibrarySourceMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,8 +29,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -34,6 +43,7 @@ private const val FULL_STARTUP_PULL_TTL_MS = 6 * 60 * 60 * 1000L
 private const val FOREGROUND_ACTIVITY_PULL_DELAY_MS = 2_500L
 private const val FOREGROUND_ACTIVITY_PULL_MIN_INTERVAL_MS = 2 * 60_000L
 private const val PERIODIC_SURFACE_PULL_INTERVAL_MS = 15 * 60_000L
+private const val STARTUP_WORK_FALLBACK_DELAY_MS = 8_000L
 
 internal data class SurfacePullFreshness(
     val key: String? = null,
@@ -67,98 +77,245 @@ class StartupSyncService @Inject constructor(
     private val watchProgressPreferences: WatchProgressPreferences,
     private val profileManager: ProfileManager,
     private val startupSyncPreferences: StartupSyncPreferences,
-    private val cwEnrichmentCache: com.nuvio.tv.data.local.ContinueWatchingEnrichmentCache
+    private val cwEnrichmentCache: com.nuvio.tv.data.local.ContinueWatchingEnrichmentCache,
+    private val androidTvChannelSyncService: AndroidTvChannelSyncService
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var startupPullJob: Job? = null
     private var activityPullJob: Job? = null
     private var periodicSurfacePullJob: Job? = null
+    private var startupFallbackJob: Job? = null
+    private val startupStateLock = Any()
+    private val startupSyncCoordinator = StartupSyncCoordinator()
+    private var startupWorkReleaseState = StartupWorkReleaseState()
     private var lastPulledKey: String? = null
     private var lastPulledIncludedProfileSettings: Boolean = false
     private var lastPulledAtMs: Long = 0L
     private var activityPullFreshness = SurfacePullFreshness()
-    @Volatile
     private var forceSyncRequested: Boolean = false
-    @Volatile
     private var forceSyncIncludesProfileSettings: Boolean = true
-    @Volatile
-    private var pendingResyncKey: String? = null
-    @Volatile
-    private var pendingResyncIncludesProfileSettings: Boolean = false
+    private var firstInteractiveMarked = false
+    private val _startupWorkReleased = MutableStateFlow(false)
+
+    /**
+     * Local process state for Home's optional metadata enrichment. This never carries profile,
+     * account, content, or network data.
+     */
+    val startupWorkReleased: StateFlow<Boolean> = _startupWorkReleased.asStateFlow()
 
     init {
         scope.launch {
             authManager.authState.collect { state ->
                 when (state) {
                     is AuthState.FullAccount -> {
-                        val force = forceSyncRequested
-                        val includeProfileSettings = if (force) forceSyncIncludesProfileSettings else true
-                        val started = scheduleStartupPull(
-                            userId = state.userId,
-                            force = force,
-                            includeProfileSettings = includeProfileSettings
-                        )
-                        if (force && started) forceSyncRequested = false
+                        if (!_startupWorkReleased.value) return@collect
+                        scheduleStartupPullForActiveAccount()
                     }
                     is AuthState.SignedOut -> {
-                        startupPullJob?.cancel()
-                        startupPullJob = null
-                        activityPullJob?.cancel()
-                        activityPullJob = null
-                        periodicSurfacePullJob?.cancel()
-                        periodicSurfacePullJob = null
-                        lastPulledKey = null
-                        lastPulledIncludedProfileSettings = false
-                        lastPulledAtMs = 0L
-                        activityPullFreshness = SurfacePullFreshness()
-                        forceSyncRequested = false
-                        forceSyncIncludesProfileSettings = true
-                        pendingResyncKey = null
-                        pendingResyncIncludesProfileSettings = false
+                        synchronized(startupStateLock) {
+                            // An active pull can be in a DataStore write. Let it leave its
+                            // profile-scoped write consistent, but never run queued old-account
+                            // work after sign-out.
+                            startupSyncCoordinator.discardPending()
+                            startupPullJob?.cancel(
+                                CancellationException("Account signed out during startup sync")
+                            )
+                            activityPullJob?.cancel(
+                                CancellationException("Account signed out during activity sync")
+                            )
+                            periodicSurfacePullJob?.cancel()
+                            periodicSurfacePullJob = null
+                            lastPulledKey = null
+                            lastPulledIncludedProfileSettings = false
+                            lastPulledAtMs = 0L
+                            activityPullFreshness = SurfacePullFreshness()
+                            forceSyncRequested = false
+                            forceSyncIncludesProfileSettings = true
+                        }
                     }
                     is AuthState.Loading -> Unit
+                }
+            }
+        }
+        scope.launch {
+            profileManager.activeProfileIdentity.collect { identity ->
+                identity?.let { onActiveProfileChanged(it.id) }
+                if (_startupWorkReleased.value) {
+                    scheduleStartupPullForActiveAccount()
                 }
             }
         }
     }
 
     fun startPeriodicSurfacePulls() {
-        if (periodicSurfacePullJob?.isActive == true) return
-        periodicSurfacePullJob = scope.launch {
-            while (true) {
-                delay(PERIODIC_SURFACE_PULL_INTERVAL_MS)
-                scheduleActivityPull(reason = "periodic")
+        synchronized(startupStateLock) {
+            if (!_startupWorkReleased.value || !startupWorkReleaseState.appInForeground) return
+            if (periodicSurfacePullJob?.isActive == true) return
+            periodicSurfacePullJob = scope.launch {
+                while (true) {
+                    delay(PERIODIC_SURFACE_PULL_INTERVAL_MS)
+                    scheduleActivityPull(reason = "periodic")
+                }
             }
         }
     }
 
     fun stopPeriodicSurfacePulls() {
-        periodicSurfacePullJob?.cancel()
-        periodicSurfacePullJob = null
-    }
-
-    fun requestSyncNow(includeProfileSettings: Boolean = true) {
-        forceSyncRequested = true
-        forceSyncIncludesProfileSettings = forceSyncIncludesProfileSettings || includeProfileSettings
-        when (val state = authManager.authState.value) {
-            is AuthState.FullAccount -> {
-                val started = scheduleStartupPull(
-                    userId = state.userId,
-                    force = true,
-                    includeProfileSettings = includeProfileSettings
-                )
-                if (started) forceSyncRequested = false
-            }
-            else -> Unit
+        synchronized(startupStateLock) {
+            periodicSurfacePullJob?.cancel()
+            periodicSurfacePullJob = null
         }
     }
 
+    fun requestSyncNow(includeProfileSettings: Boolean = true) {
+        synchronized(startupStateLock) {
+            forceSyncRequested = true
+            forceSyncIncludesProfileSettings =
+                forceSyncIncludesProfileSettings || includeProfileSettings
+        }
+        // Manual refreshes are intentionally retained, but never bypass a safely resolved
+        // profile or the startup-work gate.
+        if (_startupWorkReleased.value) scheduleStartupPullForActiveAccount()
+    }
+
     fun requestForegroundSync() {
+        if (!_startupWorkReleased.value) {
+            return
+        }
         scheduleActivityPull(
             reason = "foreground",
             delayMs = FOREGROUND_ACTIVITY_PULL_DELAY_MS,
             minIntervalMs = FOREGROUND_ACTIVITY_PULL_MIN_INTERVAL_MS
         )
+    }
+
+    /**
+     * Starts the bounded fallback clock once there is a foreground surface. It is deliberately
+     * independent of login/network success: a quiet TV remote cannot leave syncing disabled.
+     */
+    fun onAppForeground() {
+        transitionStartupWorkRelease(StartupWorkReleaseEvent.Foreground)
+    }
+
+    /** Do not spend the fallback budget while the app is behind another activity. */
+    fun onAppBackground() {
+        transitionStartupWorkRelease(StartupWorkReleaseEvent.Background)
+    }
+
+    /** Called for a real key/touch interaction, not for lifecycle or navigation events. */
+    fun onFirstUserInteraction() {
+        transitionStartupWorkRelease(StartupWorkReleaseEvent.FirstInteraction)
+        markFirstInteractiveIfReady()
+    }
+
+    /**
+     * Home calls this only after profile-scoped local content (including placeholders) is safe to
+     * show. This avoids starting a pull for a profile tile the user has merely focused.
+     */
+    fun onHomeShellReady() {
+        val profileId = profileManager.activeProfileIdentity.value?.id ?: return
+        if (!isResolvedActiveProfile(profileId)) return
+        transitionStartupWorkRelease(StartupWorkReleaseEvent.HomeShellReady(profileId))
+        markFirstInteractiveIfReady()
+    }
+
+    private fun markFirstInteractiveIfReady() {
+        val shouldMark = synchronized(startupStateLock) {
+            val shellProfileId = startupWorkReleaseState.shellProfileId
+            if (
+                firstInteractiveMarked ||
+                !startupWorkReleaseState.hasFirstInteraction ||
+                shellProfileId == null ||
+                !startupWorkReleaseState.appInForeground ||
+                !isResolvedActiveProfile(shellProfileId)
+            ) {
+                false
+            } else {
+                firstInteractiveMarked = true
+                true
+            }
+        }
+        if (shouldMark) StartupTimingMarkers.markFirstInteractive()
+    }
+
+    private fun onActiveProfileChanged(profileId: Int) {
+        transitionStartupWorkRelease(StartupWorkReleaseEvent.ActiveProfileChanged(profileId))
+        synchronized(startupStateLock) {
+            // All remote reads below are cancellable and every DataStore mutation is atomic.
+            // Cancelling is therefore safer than allowing an old account/profile request to
+            // continue into another profile's active stores.
+            startupPullJob?.cancel(
+                CancellationException("Active profile changed during startup sync")
+            )
+            activityPullJob?.cancel(
+                CancellationException("Active profile changed during activity sync")
+            )
+        }
+    }
+
+    private fun transitionStartupWorkRelease(event: StartupWorkReleaseEvent) {
+        var fallbackToCancel: Job? = null
+        var releaseNow = false
+        synchronized(startupStateLock) {
+            val transition = transitionStartupWorkRelease(startupWorkReleaseState, event)
+            startupWorkReleaseState = transition.state
+            if (transition.cancelFallback) {
+                fallbackToCancel = startupFallbackJob
+                startupFallbackJob = null
+            }
+            if (transition.armFallback) {
+                startupFallbackJob = scope.launch {
+                    delay(STARTUP_WORK_FALLBACK_DELAY_MS)
+                    transitionStartupWorkRelease(StartupWorkReleaseEvent.FallbackElapsed)
+                }
+            }
+            if (transition.releaseNow && !_startupWorkReleased.value) {
+                _startupWorkReleased.value = true
+                fallbackToCancel = startupFallbackJob
+                startupFallbackJob = null
+                releaseNow = true
+            }
+        }
+        fallbackToCancel?.cancel()
+        if (!releaseNow) return
+        // This only installs local observers/schedules work. Network work remains behind the
+        // authenticated, active-profile checks in scheduleStartupPullForActiveAccount().
+        androidTvChannelSyncService.start()
+        // The release coordinator only permits this while foregrounded. Do not synthesize a
+        // foreground transition after onStop: that would reconcile a stale launcher channel.
+        androidTvChannelSyncService.onForegroundChanged(true)
+        startPeriodicSurfacePulls()
+        scheduleStartupPullForActiveAccount()
+    }
+
+    private fun scheduleStartupPullForActiveAccount() {
+        if (!_startupWorkReleased.value) return
+        scope.launch {
+            val profileId = profileManager.activeProfileIdentity
+                .first { it != null }
+                ?.id
+                ?: return@launch
+            val currentState = authManager.authState.value as? AuthState.FullAccount ?: return@launch
+            if (!_startupWorkReleased.value || !isResolvedActiveProfile(profileId)) return@launch
+            val force: Boolean
+            val includeProfileSettings: Boolean
+            synchronized(startupStateLock) {
+                force = forceSyncRequested
+                includeProfileSettings = if (force) forceSyncIncludesProfileSettings else true
+            }
+            val started = scheduleStartupPull(
+                userId = currentState.userId,
+                profileId = profileId,
+                force = force,
+                includeProfileSettings = includeProfileSettings
+            )
+            if (force && started) {
+                synchronized(startupStateLock) {
+                    forceSyncRequested = false
+                    forceSyncIncludesProfileSettings = true
+                }
+            }
+        }
     }
 
     private val _manualAddonRefreshes = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -167,7 +324,7 @@ class StartupSyncService @Inject constructor(
     val manualAddonRefreshes: SharedFlow<Unit> = _manualAddonRefreshes.asSharedFlow()
 
     fun requestAddonSyncNow() {
-        val profileId = profileManager.activeProfileId.value
+        val profileId = profileManager.activeProfileIdentity.value?.id ?: return
         Log.d(TAG, "Manual addon sync enqueued for profile $profileId")
         scope.launch {
             Log.d(TAG, "Manual addon sync starting for profile $profileId")
@@ -195,7 +352,8 @@ class StartupSyncService @Inject constructor(
 
     fun requestRealtimeSurfacePull(profileId: Int, surface: String) {
         if (!authManager.isAuthenticated) return
-        if (surface != "profiles" && profileManager.activeProfileId.value != profileId) {
+        val activeProfileId = profileManager.activeProfileIdentity.value?.id ?: return
+        if (surface != "profiles" && activeProfileId != profileId) {
             Log.d(TAG, "Ignoring realtime surface=$surface for inactive profile $profileId")
             return
         }
@@ -276,37 +434,65 @@ class StartupSyncService @Inject constructor(
         minIntervalMs: Long = 0L
     ): Boolean {
         val state = authManager.authState.value as? AuthState.FullAccount ?: return false
-        val key = pullKey(state.userId)
+        val profileId = profileManager.activeProfileIdentity.value?.id ?: return false
+        if (!isResolvedActiveProfile(profileId)) return false
+        val key = pullKey(state.userId, profileId)
         val now = SystemClock.elapsedRealtime()
-        if (startupPullJob?.isActive == true || activityPullJob?.isActive == true) return false
-        if (activityPullFreshness.isRecent(key, now, minIntervalMs)) return false
+        synchronized(startupStateLock) {
+            if (activityPullFreshness.isRecent(key, now, minIntervalMs)) return false
+            if (!startupSyncCoordinator.beginActivity()) return false
 
-        activityPullJob = scope.launch {
-            if (delayMs > 0L) delay(delayMs)
-            val currentState = authManager.authState.value as? AuthState.FullAccount ?: return@launch
-            if (pullKey(currentState.userId) != key || startupPullJob?.isActive == true) return@launch
-            val profileId = profileManager.activeProfileId.value
-            Log.d(TAG, "Activity sync started profile=$profileId reason=$reason")
-            val succeeded = coroutineScope {
-                val watchState = async { pullPeriodicWatchState() }
-                val library = async { pullPeriodicLibrary() }
-                watchState.await() && library.await()
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    if (delayMs > 0L) delay(delayMs)
+                    val currentState = authManager.authState.value as? AuthState.FullAccount ?: return@launch
+                    if (
+                        pullKey(currentState.userId, profileId) != key ||
+                        !isResolvedActiveProfile(profileId)
+                    ) {
+                        return@launch
+                    }
+                    Log.d(TAG, "Activity sync started profile=$profileId reason=$reason")
+                    val succeeded = coroutineScope {
+                        val watchState = async { pullPeriodicWatchState(profileId) }
+                        val library = async { pullPeriodicLibrary(profileId) }
+                        watchState.await() && library.await()
+                    }
+                    if (succeeded) {
+                        synchronized(startupStateLock) {
+                            activityPullFreshness = SurfacePullFreshness(
+                                key = key,
+                                pulledAtMs = SystemClock.elapsedRealtime()
+                            )
+                        }
+                    }
+                    Log.d(TAG, "Activity sync completed profile=$profileId reason=$reason succeeded=$succeeded")
+                } finally {
+                    val pendingStartup = synchronized(startupStateLock) {
+                        activityPullJob = null
+                        startupSyncCoordinator.finishActivity()
+                    }
+                    pendingStartup?.let { request ->
+                        if (isCurrentRequest(request)) {
+                            scheduleStartupPull(
+                                userId = request.userId,
+                                profileId = request.profileId,
+                                force = request.force,
+                                includeProfileSettings = request.includeProfileSettings,
+                                bypassForceThrottle = true
+                            )
+                        }
+                    }
+                }
             }
-            if (succeeded) {
-                activityPullFreshness = SurfacePullFreshness(
-                    key = key,
-                    pulledAtMs = SystemClock.elapsedRealtime()
-                )
-            }
-            Log.d(TAG, "Activity sync completed profile=$profileId reason=$reason succeeded=$succeeded")
+            activityPullJob = job
+            job.start()
+            return true
         }
-        return true
     }
 
-    private suspend fun pullPeriodicWatchState(): Boolean {
+    private suspend fun pullPeriodicWatchState(profileId: Int): Boolean {
         if (authManager.authState.value !is AuthState.FullAccount) return false
-
-        val profileId = profileManager.activeProfileId.value
         val shouldUseSupabaseWatchProgressSync = watchProgressSyncService.shouldUseSupabaseWatchProgressSync(profileId)
         Log.d(
             TAG,
@@ -329,112 +515,172 @@ class StartupSyncService @Inject constructor(
         }
     }
 
-    private suspend fun pullPeriodicLibrary(): Boolean {
+    private suspend fun pullPeriodicLibrary(profileId: Int): Boolean {
         if (authManager.authState.value !is AuthState.FullAccount) return false
-
-        val profileId = profileManager.activeProfileId.value
         Log.d(TAG, "Periodic library pull requested profile=$profileId")
         return pullNuvioLibrary(profileId)
     }
 
-    private fun pullKey(userId: String): String {
-        val profileId = profileManager.activeProfileId.value
+    private fun pullKey(userId: String, profileId: Int): String {
         return "${userId}_p${profileId}"
     }
 
     private fun scheduleStartupPull(
         userId: String,
+        profileId: Int,
         force: Boolean = false,
-        includeProfileSettings: Boolean = true
+        includeProfileSettings: Boolean = true,
+        bypassForceThrottle: Boolean = false
     ): Boolean {
-        val key = pullKey(userId)
+        if (!isResolvedActiveProfile(profileId)) return false
+        val key = pullKey(userId, profileId)
         val now = SystemClock.elapsedRealtime()
-        val sameKey = lastPulledKey == key
-        val coversProfileSettings = !includeProfileSettings || lastPulledIncludedProfileSettings
-        if (!force && sameKey && coversProfileSettings) {
-            return false
-        }
-        if (
-            force &&
-            sameKey &&
-            coversProfileSettings &&
-            startupPullJob?.isActive != true &&
-            now - lastPulledAtMs < FORCE_RESYNC_MIN_INTERVAL_MS
-        ) {
-            return false
-        }
-        // Never cancel an active sync — it may be mid-write to DataStore.
-        // Instead, schedule a follow-up sync after the current one finishes.
-        if (startupPullJob?.isActive == true) {
-            if (force) {
-                pendingResyncKey = key
-                pendingResyncIncludesProfileSettings =
-                    pendingResyncIncludesProfileSettings || includeProfileSettings
+        val request = StartupSyncCoordinator.Request(
+            userId = userId,
+            profileId = profileId,
+            force = force,
+            includeProfileSettings = includeProfileSettings
+        )
+        synchronized(startupStateLock) {
+            val sameKey = lastPulledKey == key
+            val coversProfileSettings = !includeProfileSettings || lastPulledIncludedProfileSettings
+            if (!force && sameKey && coversProfileSettings) return false
+            if (
+                force &&
+                sameKey &&
+                coversProfileSettings &&
+                !startupSyncCoordinator.hasActiveRequest() &&
+                !bypassForceThrottle &&
+                now - lastPulledAtMs < FORCE_RESYNC_MIN_INTERVAL_MS
+            ) {
+                return false
             }
-            return false
-        }
-        activityPullJob?.cancel()
-        activityPullJob = null
 
-        startupPullJob = scope.launch {
+            // The coordinator retains the newest request while either pull type owns the
+            // profile stores. A profile/account change explicitly cancels that stale owner.
+            val acceptedRequest = startupSyncCoordinator.enqueue(request) ?: return false
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                runStartupPull(acceptedRequest)
+            }
+            startupPullJob = job
+            job.start()
+            return true
+        }
+    }
+
+    private suspend fun runStartupPull(request: StartupSyncCoordinator.Request) {
+        val key = pullKey(request.userId, request.profileId)
+        var syncCompleted = false
+        try {
             val maxAttempts = 3
-            var syncCompleted = false
             for (attempt in 1..maxAttempts) {
+                // Do not begin a new attempt for a profile/account that is no longer resolved.
+                // A started attempt is allowed to finish so a DataStore edit is not cancelled.
+                if (!isCurrentRequest(request)) break
                 val result = pullRemoteData(
-                    userId = userId,
-                    force = force,
-                    includeProfileSettings = includeProfileSettings
+                    userId = request.userId,
+                    profileId = request.profileId,
+                    force = request.force,
+                    includeProfileSettings = request.includeProfileSettings
                 )
                 if (result.isSuccess) {
-                    lastPulledKey = key
-                    lastPulledIncludedProfileSettings = includeProfileSettings
-                    lastPulledAtMs = SystemClock.elapsedRealtime()
-                    activityPullFreshness = SurfacePullFreshness(
-                        key = key,
-                        pulledAtMs = lastPulledAtMs
-                    )
+                    // Keep a finished old-profile write isolated from freshness for the newly
+                    // selected profile/account. The write itself is allowed to finish safely.
+                    if (isCurrentRequest(request)) {
+                        synchronized(startupStateLock) {
+                            lastPulledKey = key
+                            lastPulledIncludedProfileSettings = request.includeProfileSettings
+                            lastPulledAtMs = SystemClock.elapsedRealtime()
+                            activityPullFreshness = SurfacePullFreshness(
+                                key = key,
+                                pulledAtMs = lastPulledAtMs
+                            )
+                        }
+                    }
                     syncCompleted = true
                     break
                 }
 
                 Log.w(TAG, "Startup sync attempt $attempt failed for key=$key", result.exceptionOrNull())
-                if (attempt < maxAttempts) {
-                    delay(3000)
-                }
+                if (attempt < maxAttempts) delay(3000)
             }
-            
-            val resyncKey = pendingResyncKey
-            if (resyncKey != null) {
-                val resyncIncludesProfileSettings = pendingResyncIncludesProfileSettings
-                pendingResyncKey = null
-                pendingResyncIncludesProfileSettings = false
-                if (
-                    !syncCompleted ||
-                    resyncKey != lastPulledKey ||
-                    (resyncIncludesProfileSettings && !lastPulledIncludedProfileSettings)
-                ) {
+        } finally {
+            // Clear active ownership before considering the successor. Calling scheduling while
+            // this job was still active was the source of permanently requeued resync requests.
+            val followup = synchronized(startupStateLock) {
+                startupPullJob = null
+                startupSyncCoordinator.finish(request)
+            }
+            if (followup != null && shouldRunFollowup(followup, syncCompleted)) {
+                if (isCurrentRequest(followup)) {
                     scheduleStartupPull(
-                        userId = userId,
+                        userId = followup.userId,
+                        profileId = followup.profileId,
                         force = true,
-                        includeProfileSettings = resyncIncludesProfileSettings
+                        includeProfileSettings = followup.includeProfileSettings,
+                        bypassForceThrottle = true
                     )
+                } else {
+                    // The profile/account changed while the old write was completing. The
+                    // observers will request the currently resolved identity; never revive this
+                    // stale request just because it was pending.
+                    scheduleStartupPullForActiveAccount()
                 }
             }
         }
-        return true
+    }
+
+    private fun shouldRunFollowup(
+        request: StartupSyncCoordinator.Request,
+        syncCompleted: Boolean
+    ): Boolean = synchronized(startupStateLock) {
+        !syncCompleted ||
+            pullKey(request.userId, request.profileId) != lastPulledKey ||
+            (request.includeProfileSettings && !lastPulledIncludedProfileSettings)
+    }
+
+    private fun isCurrentRequest(request: StartupSyncCoordinator.Request): Boolean {
+        return _startupWorkReleased.value &&
+            isCurrentContext(request.userId, request.profileId)
+    }
+
+    private fun requireCurrentContext(userId: String, profileId: Int) {
+        if (!isCurrentContext(userId, profileId)) {
+            throw CancellationException("Startup sync identity changed")
+        }
+    }
+
+    private fun isCurrentContext(userId: String, profileId: Int): Boolean {
+        val state = authManager.authState.value as? AuthState.FullAccount ?: return false
+        val currentProfileId = profileManager.activeProfileIdentity.value?.id
+        return startupSyncCoordinator.matchesCurrentIdentity(
+            request = StartupSyncCoordinator.Request(
+                userId = userId,
+                profileId = profileId,
+                force = false,
+                includeProfileSettings = false
+            ),
+            userId = state.userId,
+            profileId = currentProfileId
+        ) && isResolvedActiveProfile(profileId)
+    }
+
+    private fun isResolvedActiveProfile(profileId: Int): Boolean {
+        return profileManager.activeProfileIdentity.value?.id == profileId &&
+            profileManager.profiles.value.any { it.id == profileId }
     }
 
     private suspend fun pullRemoteData(
         userId: String,
+        profileId: Int,
         force: Boolean,
         includeProfileSettings: Boolean
     ): Result<Unit> {
         try {
-            val profileId = profileManager.activeProfileId.value
             val syncState = startupSyncPreferences.getState(profileId)
             val canUseWarmSync = !force &&
-                lastPulledKey == pullKey(userId) &&
-                lastPulledAtMs > 0L &&
+                synchronized(startupStateLock) { lastPulledKey == pullKey(userId, profileId) } &&
+                synchronized(startupStateLock) { lastPulledAtMs > 0L } &&
                 syncState.lastFullPullUserId == userId &&
                 syncState.lastFullPullAtMs > 0L &&
                 System.currentTimeMillis() - syncState.lastFullPullAtMs < FULL_STARTUP_PULL_TTL_MS &&
@@ -449,7 +695,12 @@ class StartupSyncService @Inject constructor(
             }
 
             Log.d(TAG, "Pulling remote data for profile $profileId")
-            pullBroadRemoteData(profileId, includeProfileSettings)
+            pullBroadRemoteData(
+                userId = userId,
+                profileId = profileId,
+                includeProfileSettings = includeProfileSettings
+            )
+            requireCurrentContext(userId, profileId)
 
             val shouldUseSupabaseWatchProgressSync = watchProgressSyncService.shouldUseSupabaseWatchProgressSync(profileId)
             Log.d(
@@ -469,12 +720,15 @@ class StartupSyncService @Inject constructor(
                 watchProgressRepository.hasCompletedInitialWatchedItemsPull = true
                 Log.d(TAG, "Skipping Supabase watched items and watch progress for profile $profileId because a tracking provider is active")
             }
+            requireCurrentContext(userId, profileId)
             startupSyncPreferences.markFullPull(
                 profileId = profileId,
                 userId = userId,
                 includeProfileSettings = includeProfileSettings
             )
             return Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             pluginManager.isSyncingFromRemote = false
             addonRepository.isSyncingFromRemote = false
@@ -492,7 +746,12 @@ class StartupSyncService @Inject constructor(
     ): Result<Unit> {
         try {
             Log.d(TAG, "Running warm remote sync for profile $profileId")
-            pullBroadRemoteData(profileId, includeProfileSettings)
+            pullBroadRemoteData(
+                userId = userId,
+                profileId = profileId,
+                includeProfileSettings = includeProfileSettings
+            )
+            requireCurrentContext(userId, profileId)
             val shouldUseSupabaseWatchProgressSync = watchProgressSyncService.shouldUseSupabaseWatchProgressSync(profileId)
             Log.d(
                 TAG,
@@ -510,12 +769,15 @@ class StartupSyncService @Inject constructor(
                 watchProgressRepository.hasCompletedInitialWatchedItemsPull = true
                 Log.d(TAG, "Skipping warm Supabase watch progress sync for profile $profileId because a tracking provider is active")
             }
+            requireCurrentContext(userId, profileId)
             startupSyncPreferences.markFullPull(
                 profileId = profileId,
                 userId = userId,
                 includeProfileSettings = includeProfileSettings
             )
             return Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             watchProgressRepository.isSyncingFromRemote = false
             libraryRepository.isSyncingFromRemote = false
@@ -525,22 +787,28 @@ class StartupSyncService @Inject constructor(
     }
 
     private suspend fun pullBroadRemoteData(
+        userId: String,
         profileId: Int,
         includeProfileSettings: Boolean
     ) {
+        requireCurrentContext(userId, profileId)
         profileSyncService.pullFromRemote().getOrElse { throw it }
+        requireCurrentContext(userId, profileId)
         Log.d(TAG, "Pulled profiles from remote")
 
         if (includeProfileSettings) {
-            profileSettingsSyncService.pullCurrentProfileFromRemote()
+            requireCurrentContext(userId, profileId)
+            profileSettingsSyncService.pullProfileFromRemote(profileId)
                 .onSuccess { applied ->
                     Log.d(TAG, "Profile settings blob pull completed for profile $profileId (applied=$applied)")
                 }
                 .onFailure { e ->
                     Log.e(TAG, "Failed to pull profile settings blob, keeping local settings", e)
                 }
+            requireCurrentContext(userId, profileId)
         }
 
+        requireCurrentContext(userId, profileId)
         providerCredentialSyncService.syncFromRemote(profileId)
             .onSuccess { applied ->
                 Log.d(TAG, "Provider credential sync completed for profile $profileId applied=$applied")
@@ -548,9 +816,11 @@ class StartupSyncService @Inject constructor(
             .onFailure { error ->
                 Log.e(TAG, "Failed to sync provider credentials, keeping local credentials", error)
             }
+        requireCurrentContext(userId, profileId)
 
         coroutineScope {
             val libraryJob = async {
+                requireCurrentContext(userId, profileId)
                 val isTrackingLibrary = libraryRepository.sourceMode.first() != LibrarySourceMode.LOCAL
                 if (!isTrackingLibrary) {
                     libraryRepository.isSyncingFromRemote = true
@@ -562,6 +832,8 @@ class StartupSyncService @Inject constructor(
                             "Library sync completed profile=$profileId snapshot=${result.usedSnapshot} " +
                                 "upserts=${result.appliedUpserts} deletes=${result.appliedDeletes}"
                         )
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to pull library, continuing with other syncs", e)
                         libraryRepository.hasCompletedInitialPull = true
@@ -569,6 +841,7 @@ class StartupSyncService @Inject constructor(
                         libraryRepository.isSyncingFromRemote = false
                     }
                 } else {
+                    requireCurrentContext(userId, profileId)
                     libraryRepository.hasCompletedInitialPull = true
                 }
             }
@@ -576,12 +849,19 @@ class StartupSyncService @Inject constructor(
             val pluginJob = async {
                 pluginManager.isSyncingFromRemote = true
                 try {
-                    val remotePlugins = pluginSyncService.getRemoteRepoUrls().getOrElse { throw it }
+                    val remotePlugins = pluginSyncService.getRemoteRepoUrls(
+                        userId = userId,
+                        profileId = profileId
+                    ).getOrElse { throw it }
+                    requireCurrentContext(userId, profileId)
                     pluginManager.reconcileWithRemoteRepoUrls(
                         remotePlugins = remotePlugins,
-                        removeMissingLocal = true
+                        removeMissingLocal = true,
+                        canApply = { isCurrentContext(userId, profileId) }
                     )
                     Log.d(TAG, "Pulled ${remotePlugins.size} plugin repos from remote for profile $profileId")
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to pull plugins from remote, keeping local cache", e)
                 } finally {
@@ -593,12 +873,21 @@ class StartupSyncService @Inject constructor(
             val addonJob = async {
                 addonRepository.isSyncingFromRemote = true
                 try {
-                    val remoteAddonUrls = addonSyncService.getRemoteAddonUrls().getOrElse { throw it }
+                    val remoteAddonUrls = addonSyncService.getRemoteAddonUrls(
+                        userId = userId,
+                        profileId = profileId,
+                        canApply = { isCurrentContext(userId, profileId) }
+                    ).getOrElse { throw it }
+                    requireCurrentContext(userId, profileId)
                     addonRepository.reconcileWithRemoteAddonUrls(
                         remoteUrls = remoteAddonUrls,
-                        removeMissingLocal = true
+                        removeMissingLocal = true,
+                        profileId = profileId,
+                        canApply = { isCurrentContext(userId, profileId) }
                     )
                     Log.d(TAG, "Pulled ${remoteAddonUrls.size} addons from remote for profile $profileId")
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to pull addons from remote, keeping local cache", e)
                 } finally {
@@ -608,13 +897,18 @@ class StartupSyncService @Inject constructor(
 
             val collectionJob = async {
                 try {
-                    collectionSyncService.pullFromRemote()
+                    collectionSyncService.pullFromRemote(
+                        profileId = profileId,
+                        userId = userId
+                    )
                         .onSuccess { applied ->
                             Log.d(TAG, "Collections pull completed for profile $profileId (applied=$applied)")
                         }
                         .onFailure { e ->
                             Log.e(TAG, "Failed to pull collections from remote, keeping local", e)
                         }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to pull collections from remote", e)
                 }
@@ -622,13 +916,18 @@ class StartupSyncService @Inject constructor(
 
             val homeCatalogJob = async {
                 try {
-                    homeCatalogSettingsSyncService.pullFromRemote()
+                    homeCatalogSettingsSyncService.pullFromRemote(
+                        profileId = profileId,
+                        userId = userId
+                    )
                         .onSuccess { applied ->
                             Log.d(TAG, "Home catalog settings pull completed for profile $profileId (applied=$applied)")
                         }
                         .onFailure { e ->
                             Log.e(TAG, "Failed to pull home catalog settings from remote, keeping local", e)
                         }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to pull home catalog settings from remote", e)
                 }

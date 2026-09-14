@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.ViewTreeObserver
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -107,6 +109,7 @@ import com.nuvio.tv.ui.components.StartupDestination
 import com.nuvio.tv.ui.components.shouldShowStartupSplash
 import com.nuvio.tv.ui.components.startupDestinationForRoute
 import com.nuvio.tv.core.runtime.PluginRuntimeHooks
+import com.nuvio.tv.core.startup.StartupTimingMarkers
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -206,9 +209,11 @@ import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import java.util.Locale
 import javax.inject.Inject
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
@@ -342,6 +347,9 @@ open class MainActivity : ComponentActivity() {
 
     /** True until the first onResume after onCreate completes. */
     private var isFirstResumeAfterCreate = false
+    private var firstFrameListenerInstalled = false
+    private var firstFrameRecorded = false
+    private var deferredStartupRefreshJob: Job? = null
 
     @OptIn(ExperimentalTvMaterial3Api::class, ExperimentalFoundationApi::class)
     override fun attachBaseContext(newBase: Context) {
@@ -365,6 +373,7 @@ open class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
+        StartupTimingMarkers.markActivityCreated()
         isFirstResumeAfterCreate = true
         window?.setBackgroundDrawable(null)
 
@@ -482,7 +491,10 @@ open class MainActivity : ComponentActivity() {
                 }
             }
 
-            val activeProfileId by profileManager.activeProfileId.collectAsState()
+            val activeProfileIdentity by profileManager.activeProfileIdentity.collectAsState()
+            // Keep the legacy non-null id for non-content presentation state, but never make an
+            // automated profile decision until the atomic DataStore identity has arrived.
+            val activeProfileId = activeProfileIdentity?.id ?: 1
             val startupSplashEnabled by profileManager.startupSplashEnabled.collectAsState()
             val startupLoadingState = remember(activeProfileId, startupSession) { StartupLoadingState() }
             val profiles by profileManager.profiles.collectAsState()
@@ -508,7 +520,8 @@ open class MainActivity : ComponentActivity() {
             }
 
             var profileSwitchedManually by remember { mutableStateOf(false) }
-            val shouldAutoSelectProfile = rememberLastProfileEnabled &&
+            val shouldAutoSelectProfile = activeProfileIdentity != null &&
+                rememberLastProfileEnabled &&
                 hasEverSelectedProfile && !activeProfileHasPin &&
                 !hasSelectedProfileThisSession && !profileSwitchedManually
             if (shouldAutoSelectProfile && !splashTriggered) {
@@ -517,9 +530,6 @@ open class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(shouldAutoSelectProfile) {
                 if (shouldAutoSelectProfile) {
-                    if (authManager.authState.value is AuthState.FullAccount) {
-                        startupSyncService.requestSyncNow()
-                    }
                     // Preload profile background catalog so the splash can show it
                     activeProfile?.profileBackgroundId?.let {
                         profileBackgroundRepository.loadSelectedAndPreload(it)
@@ -809,9 +819,6 @@ open class MainActivity : ComponentActivity() {
                                     onboardingCompletedThisSession = true
                                     onboardingProfileSyncInProgress = false
                                 }
-                                if (authManager.authState.value is AuthState.FullAccount) {
-                                    startupSyncService.requestSyncNow()
-                                }
                             }
                         )
                     } else {
@@ -842,9 +849,6 @@ open class MainActivity : ComponentActivity() {
                             },
                             onProfileSelected = {
                                 hasSelectedProfileThisSession = true
-                                if (authManager.authState.value is AuthState.FullAccount) {
-                                    startupSyncService.requestSyncNow()
-                                }
                             }
                         )
                     } else {
@@ -1294,24 +1298,60 @@ open class MainActivity : ComponentActivity() {
                 )
             }
         }
+        recordFirstAppFrame()
+    }
+
+    private fun recordFirstAppFrame() {
+        if (firstFrameListenerInstalled) return
+        firstFrameListenerInstalled = true
+        val decorView = window.decorView
+        val listener = object : ViewTreeObserver.OnDrawListener {
+            override fun onDraw() {
+                if (firstFrameRecorded) return
+                firstFrameRecorded = true
+                StartupTimingMarkers.markFirstFrame()
+                // ViewTreeObserver forbids listener removal while dispatching onDraw. Post it
+                // back to the UI queue and verify the observer still belongs to this Activity.
+                decorView.post {
+                    val observer = decorView.viewTreeObserver
+                    if (observer.isAlive) {
+                        observer.removeOnDrawListener(this)
+                    }
+                }
+            }
+        }
+        decorView.viewTreeObserver.addOnDrawListener(listener)
+    }
+
+    private fun recordFirstInteraction() {
+        // A raw input can occur on a profile picker. Keep it distinct from first_interactive,
+        // which StartupSyncService records only when the active profile owns a usable shell.
+        StartupTimingMarkers.markFirstInput()
+        startupSyncService.onFirstUserInteraction()
     }
 
     override fun onResume() {
         super.onResume()
         if (::jankStats.isInitialized) jankStats.isTrackingEnabled = true
-        memberAccessRepository.refreshIfStale()
+        startupSyncService.onAppForeground()
+        if (deferredStartupRefreshJob?.isActive != true) {
+            deferredStartupRefreshJob = lifecycleScope.launch {
+                // Entitlement/tracking refresh can fan out to providers. Use cached state for
+                // the first shell and do not queue duplicate waiting jobs across quick resumes.
+                startupSyncService.startupWorkReleased.first { it }
+                memberAccessRepository.refreshIfStale()
+                val refreshIntent = if (isFirstResumeAfterCreate) {
+                    isFirstResumeAfterCreate = false
+                    TrackingRefreshIntent.INVALIDATED
+                } else {
+                    TrackingRefreshIntent.AUTOMATIC
+                }
+                trackingProgressRefreshCoordinator.refreshConnected(refreshIntent)
+            }
+        }
         lifecycleScope.launch {
             deviceSessionRegistration.requestForegroundRegistration()
             startupSyncService.requestForegroundSync()
-        }
-        lifecycleScope.launch {
-            val refreshIntent = if (isFirstResumeAfterCreate) {
-                isFirstResumeAfterCreate = false
-                TrackingRefreshIntent.INVALIDATED
-            } else {
-                TrackingRefreshIntent.AUTOMATIC
-            }
-            trackingProgressRefreshCoordinator.refreshConnected(refreshIntent)
         }
     }
 
@@ -1349,6 +1389,9 @@ open class MainActivity : ComponentActivity() {
     val longPressBackHeld = mutableStateOf(false)
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            recordFirstInteraction()
+        }
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
             if (longPressBackHeld.value) {
                 if (event.action == KeyEvent.ACTION_UP) longPressBackHeld.value = false
@@ -1367,6 +1410,13 @@ open class MainActivity : ComponentActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            recordFirstInteraction()
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun onStart() {
         // Returning from an external player: raise the auto-next loader before the player's
         // result is dispatched and before the window repaints, so the transition shows the
@@ -1383,6 +1433,7 @@ open class MainActivity : ComponentActivity() {
         externalPlaybackTracker.onExternalPlayerCoveredApp()
         diagnosticShareController.close()
         diagnosticReportStore.markAppBackground()
+        startupSyncService.onAppBackground()
         super.onStop()
         startupSyncService.stopPeriodicSurfacePulls()
         // App going to background (e.g. user returning to the launcher): reconcile the
@@ -1391,6 +1442,7 @@ open class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        deferredStartupRefreshJob?.cancel()
         super.onDestroy()
         PluginRuntimeHooks.onActivityDestroy()
     }

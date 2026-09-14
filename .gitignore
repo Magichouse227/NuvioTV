@@ -50,6 +50,7 @@ scripts/*
 !scripts/release_beta.py
 !scripts/tests/
 !scripts/tests/*.py
+!scripts/verify-test-apk.py
 /supabase
 /SUPPORTER_COSMETICS.md
 tv-samples
@@ -62,4 +63,7 @@ logs
 AGENTS.md
 /PR.md
 docs/
+!docs/
+docs/*
+!docs/performance.md
 status-page/

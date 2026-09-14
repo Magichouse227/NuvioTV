@@ -5,7 +5,9 @@ import com.nuvio.tv.core.auth.AuthManager
 import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.data.local.CollectionsDataStore
 import com.nuvio.tv.data.remote.supabase.SupabaseCollectionBlob
+import com.nuvio.tv.domain.model.AuthState
 import io.github.jan.supabase.postgrest.Postgrest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +42,8 @@ class CollectionSyncService @Inject constructor(
     private suspend fun <T> withJwtRefreshRetry(block: suspend () -> T): T {
         return try {
             block()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (!authManager.refreshSessionIfJwtExpired(e)) throw e
             block()
@@ -83,21 +87,26 @@ class CollectionSyncService @Inject constructor(
      * Pull remote collections JSON and apply locally.
      * Returns true if local state was updated.
      */
-    suspend fun pullFromRemote(): Result<Boolean> = withContext(Dispatchers.IO) {
+    suspend fun pullFromRemote(
+        profileId: Int? = profileManager.activeProfileIdentity.value?.id,
+        userId: String? = null
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
-            val profileId = profileManager.activeProfileId.value
+            val resolvedProfileId = profileId ?: return@withContext Result.success(false)
+            if (!isCurrentContext(resolvedProfileId, userId)) return@withContext Result.success(false)
 
             val params = buildJsonObject {
-                put("p_profile_id", profileId)
+                put("p_profile_id", resolvedProfileId)
             }
 
             val response = withJwtRefreshRetry {
                 postgrest.rpc("sync_pull_collections", params)
             }
             val rows = response.decodeList<SupabaseCollectionBlob>()
+            if (!isCurrentContext(resolvedProfileId, userId)) return@withContext Result.success(false)
             val blob = rows.firstOrNull()
             if (blob == null) {
-                Log.d(TAG, "No remote collections for profile $profileId; keeping local")
+                Log.d(TAG, "No remote collections for profile $resolvedProfileId; keeping local")
                 return@withContext Result.success(false)
             }
 
@@ -105,32 +114,41 @@ class CollectionSyncService @Inject constructor(
             val remoteCollections = collectionsDataStore.importFromJson(remoteJson)
 
             // Preserve local if remote is empty but local has data
-            val localCollections = collectionsDataStore.getCurrentCollections()
+            val localCollections = collectionsDataStore.getCurrentCollections(resolvedProfileId)
             if (remoteCollections.isEmpty() && localCollections.isNotEmpty()) {
                 Log.w(TAG, "Remote collections empty while local has ${localCollections.size}; preserving local")
                 return@withContext Result.success(false)
             }
 
             // Check if different
-            val localJson = collectionsDataStore.exportCurrentProfileJson() ?: ""
+            val localJson = collectionsDataStore.exportCurrentProfileJson(resolvedProfileId) ?: ""
             if (remoteJson == localJson) {
-                Log.d(TAG, "Remote collections already match local for profile $profileId")
+                Log.d(TAG, "Remote collections already match local for profile $resolvedProfileId")
                 return@withContext Result.success(false)
             }
 
             isSyncingFromRemote = true
             try {
-                collectionsDataStore.setCollections(remoteCollections)
+                if (!isCurrentContext(resolvedProfileId, userId)) return@withContext Result.success(false)
+                collectionsDataStore.setCollections(remoteCollections, resolvedProfileId)
             } finally {
                 isSyncingFromRemote = false
             }
 
-            Log.d(TAG, "Applied ${remoteCollections.size} remote collections for profile $profileId")
+            Log.d(TAG, "Applied ${remoteCollections.size} remote collections for profile $resolvedProfileId")
             Result.success(true)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to pull collections from remote", e)
             Result.failure(e)
         }
+    }
+
+    private fun isCurrentContext(profileId: Int, userId: String?): Boolean {
+        val currentUserId = (authManager.authState.value as? AuthState.FullAccount)?.userId
+        return profileManager.activeProfileIdentity.value?.id == profileId &&
+            (userId == null || currentUserId == userId)
     }
 
     /**

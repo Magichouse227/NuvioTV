@@ -473,6 +473,18 @@ fun AdvancedSettingsContent(
                         )
                     }
                 )
+                SettingsToggleRow(
+                    title = stringResource(R.string.advanced_reduce_home_effects),
+                    subtitle = stringResource(R.string.advanced_reduce_home_effects_subtitle),
+                    checked = uiState.reduceHomeEffectsEnabled,
+                    onToggle = {
+                        viewModel.onEvent(
+                            AdvancedSettingsEvent.SetReduceHomeEffectsEnabled(
+                                !uiState.reduceHomeEffectsEnabled
+                            )
+                        )
+                    }
+                )
                 val profileManager = remember {
                     dagger.hilt.android.EntryPointAccessors.fromApplication(
                         context.applicationContext,

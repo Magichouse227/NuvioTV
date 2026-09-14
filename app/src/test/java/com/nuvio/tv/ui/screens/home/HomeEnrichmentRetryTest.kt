@@ -431,6 +431,7 @@ class HomeEnrichmentRetryTest {
             // Never ready, so the init chain parks instead of running the whole home pipeline.
             every { activeProfileReady } returns MutableStateFlow(false)
             every { activeProfileId } returns MutableStateFlow(1)
+            every { activeProfileIdentity } returns MutableStateFlow(null)
         }
         val cwEnrichmentCache =
             mockk<com.nuvio.tv.data.local.ContinueWatchingEnrichmentCache>(relaxed = true) {
@@ -443,7 +444,9 @@ class HomeEnrichmentRetryTest {
         val viewModel = HomeViewModel(
             appContext = mockk(relaxed = true),
             addonRepository = mockk(relaxed = true),
-            startupSyncService = mockk(relaxed = true),
+            startupSyncService = mockk(relaxed = true) {
+                every { startupWorkReleased } returns MutableStateFlow(true)
+            },
             catalogRepository = mockk(relaxed = true),
             watchProgressRepository = watchProgressRepository,
             libraryRepository = mockk(relaxed = true),

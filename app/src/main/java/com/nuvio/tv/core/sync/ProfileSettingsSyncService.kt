@@ -226,11 +226,18 @@ class ProfileSettingsSyncService @Inject constructor(
         }
     }
 
-    suspend fun pullCurrentProfileFromRemote(): Result<Boolean> = withContext(Dispatchers.IO) {
+    suspend fun pullCurrentProfileFromRemote(): Result<Boolean> {
+        return pullProfileFromRemote(profileManager.activeProfileId.value)
+    }
+
+    /**
+     * Pulls and applies settings for the supplied profile rather than consulting activeProfileId
+     * after a startup request has already captured its identity.
+     */
+    suspend fun pullProfileFromRemote(profileId: Int): Result<Boolean> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
             try {
-                val profileId = profileManager.activeProfileId.value
-                val blob = pullProfileFromRemote(profileId)
+                val blob = fetchProfileBlob(profileId)
                 lastForegroundPullAtMs = SystemClock.elapsedRealtime()
                 if (blob == null) {
                     Log.d(TAG, "No remote profile settings blob for profile $profileId; keeping local settings")
@@ -248,6 +255,8 @@ class ProfileSettingsSyncService @Inject constructor(
                 applySettingsBlob(profileId, featuresJson, remoteSignature)
                 Log.d(TAG, "Applied remote profile settings blob for profile $profileId")
                 Result.success(true)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to pull profile settings blob", e)
                 Result.failure(e)
@@ -279,7 +288,7 @@ class ProfileSettingsSyncService @Inject constructor(
                                 pushProfileToRemote(sourceProfileId, blob)
                             }
                         } else {
-                            pullProfileFromRemote(sourceProfileId)
+                            fetchProfileBlob(sourceProfileId)
                                 ?: exportSettingsBlob(sourceProfileId).also { blob ->
                                     pushProfileToRemote(sourceProfileId, blob)
                                 }
@@ -315,7 +324,7 @@ class ProfileSettingsSyncService @Inject constructor(
                                 )
                             )
                         }
-                        pullProfileFromRemote(targetProfileId)
+                        fetchProfileBlob(targetProfileId)
                             ?.get("features")
                             ?.jsonObject
                             ?: error("Copied TV settings are unavailable")
@@ -384,7 +393,7 @@ class ProfileSettingsSyncService @Inject constructor(
         }
     }
 
-    private suspend fun pullProfileFromRemote(profileId: Int): JsonObject? {
+    private suspend fun fetchProfileBlob(profileId: Int): JsonObject? {
         val params = buildJsonObject {
             put("p_profile_id", profileId)
             put("p_platform", SETTINGS_SYNC_PLATFORM)

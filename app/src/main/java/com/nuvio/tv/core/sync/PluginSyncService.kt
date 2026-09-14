@@ -7,6 +7,7 @@ import com.nuvio.tv.data.local.PluginDataStore
 import com.nuvio.tv.data.remote.supabase.SupabasePlugin
 import com.nuvio.tv.domain.model.RemotePluginInfo
 import io.github.jan.supabase.postgrest.Postgrest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -30,6 +31,8 @@ class PluginSyncService @Inject constructor(
     private suspend fun <T> withJwtRefreshRetry(block: suspend () -> T): T {
         return try {
             block()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (!authManager.refreshSessionIfJwtExpired(e)) throw e
             block()
@@ -82,22 +85,34 @@ class PluginSyncService @Inject constructor(
         }
     }
 
-    suspend fun getRemoteRepoUrls(): Result<List<RemotePluginInfo>> = withContext(Dispatchers.IO) {
+    suspend fun getRemoteRepoUrls(
+        userId: String? = null,
+        profileId: Int? = null
+    ): Result<List<RemotePluginInfo>> = withContext(Dispatchers.IO) {
         try {
-            val effectiveUserId = authManager.getEffectiveUserId(fallbackToOwnIdOnFailure = false)
+            val effectiveUserId = userId ?: authManager.getEffectiveUserId(fallbackToOwnIdOnFailure = false)
                 ?: return@withContext Result.failure(
                     IllegalStateException("Unable to resolve sync owner for plugin sync")
                 )
 
-            val activeProfile = profileManager.activeProfile
-            val profileId = if (activeProfile != null && !activeProfile.isPrimary && activeProfile.usesPrimaryPlugins) 1
-                            else profileManager.activeProfileId.value
+            val requestedProfileId = profileId ?: profileManager.activeProfileId.value
+            val requestedProfile = profileManager.profiles.value
+                .firstOrNull { it.id == requestedProfileId }
+            val remoteProfileId = if (
+                requestedProfile != null &&
+                !requestedProfile.isPrimary &&
+                requestedProfile.usesPrimaryPlugins
+            ) {
+                1
+            } else {
+                requestedProfileId
+            }
 
             val remotePlugins = withJwtRefreshRetry {
                 postgrest.from("plugins")
                     .select { filter {
                         eq("user_id", effectiveUserId)
-                        eq("profile_id", profileId)
+                        eq("profile_id", remoteProfileId)
                     } }
                     .decodeList<SupabasePlugin>()
             }
@@ -107,6 +122,8 @@ class PluginSyncService @Inject constructor(
                 .sortedBy { it.sortOrder }
                 .map { RemotePluginInfo(url = it.url, repoType = it.repoType) }
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get remote repo URLs", e)
             Result.failure(e)

@@ -566,7 +566,8 @@ internal fun HomeViewModel.loadMoreCatalogItemsPipeline(catalogId: String, addon
     }
 }
 
-internal suspend fun HomeViewModel.updateCatalogRowsPipeline() {
+internal suspend fun HomeViewModel.updateCatalogRowsPipeline(expectedGeneration: Long) {
+    if (expectedGeneration != catalogLoadGeneration) return
     val (orderedKeys, catalogSnapshot) = snapshotCatalogState()
     val collectionsSnapshot = collectionsCache.associateBy { "collection_${it.id}" }
     val heroCatalogKeys = currentHeroCatalogKeys
@@ -875,6 +876,9 @@ internal suspend fun HomeViewModel.updateCatalogRowsPipeline() {
     // catalogs loaded after the initial startup race set an error).
     val hasContent = computedHomeRows.isNotEmpty() || baseHeroItems.isNotEmpty() || displayRows.isNotEmpty()
 
+    // Building modern rows is CPU-bound and can complete after a profile switch even when its
+    // coroutine was cancelled. Never republish that previous profile's snapshot.
+    if (expectedGeneration != catalogLoadGeneration) return
     _uiState.update { state ->
         state.copy(
             catalogRows = if (state.catalogRows == displayRows) state.catalogRows else displayRows,
@@ -892,12 +896,13 @@ internal suspend fun HomeViewModel.updateCatalogRowsPipeline() {
     val shouldUseEnrichedHeroItems = tmdbEnabledForCurrentLayout &&
         (tmdbSettings.useArtwork || tmdbSettings.useBasicInfo || tmdbSettings.useDetails || tmdbSettings.useReleaseDates)
 
-    if (shouldUseEnrichedHeroItems && baseHeroItems.isNotEmpty()) {
+    if (startupEnrichmentAllowed.value && shouldUseEnrichedHeroItems && baseHeroItems.isNotEmpty()) {
         heroEnrichmentJob?.cancel()
         heroEnrichmentJob = viewModelScope.launch {
             val enrichmentSignature = heroEnrichmentSignaturePipeline(baseHeroItems, tmdbSettings)
             if (lastHeroEnrichmentSignature == enrichmentSignature) {
                 val cached = lastHeroEnrichedItems
+                if (expectedGeneration != catalogLoadGeneration) return@launch
                 _uiState.update { state ->
                     state.copy(
                         heroItems = if (state.heroItems == cached) state.heroItems else cached,
@@ -909,6 +914,7 @@ internal suspend fun HomeViewModel.updateCatalogRowsPipeline() {
                 }
             } else {
                 val enrichedItems = enrichHeroItemsPipeline(baseHeroItems, tmdbSettings)
+                if (expectedGeneration != catalogLoadGeneration) return@launch
                 lastHeroEnrichmentSignature = enrichmentSignature
                 lastHeroEnrichedItems = enrichedItems
                 _uiState.update { state ->
@@ -928,7 +934,9 @@ internal suspend fun HomeViewModel.updateCatalogRowsPipeline() {
         heroItemOrder = emptyList()
     }
 
-    schedulePosterStatusReconcilePipeline(displayRows)
+    if (expectedGeneration == catalogLoadGeneration) {
+        schedulePosterStatusReconcilePipeline(displayRows)
+    }
 }
 
 private fun stableHeroSortKey(

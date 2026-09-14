@@ -32,6 +32,11 @@ class AddonPreferences @Inject constructor(
         return if (active != null && active.usesPrimaryAddons) 1 else profileManager.activeProfileId.value
     }
 
+    private fun effectiveProfileId(profileId: Int): Int {
+        val profile = profileManager.profiles.value.firstOrNull { it.id == profileId }
+        return if (profile?.usesPrimaryAddons == true) 1 else profileId
+    }
+
     private fun store(profileId: Int = effectiveProfileId()) =
         factory.get(profileId, FEATURE)
 
@@ -73,6 +78,11 @@ class AddonPreferences @Inject constructor(
                 legacySet.toList()
             }
         }
+    }
+
+    suspend fun getInstalledAddonUrls(profileId: Int): List<String> {
+        val preferences = store(effectiveProfileId(profileId)).data.first()
+        return getCurrentList(preferences)
     }
 
     val addonEnabledStates: Flow<Map<String, Boolean>> = effectiveProfileIdFlow.flatMapLatest { pid ->
@@ -136,11 +146,14 @@ class AddonPreferences @Inject constructor(
         return changed
     }
 
-    suspend fun setAddonOrder(urls: List<String>): Boolean {
+    suspend fun setAddonOrder(urls: List<String>, profileId: Int? = null): Boolean {
+        if (profileId == null) {
             val active = profileManager.activeProfile
             if (active != null && !active.isPrimary && active.usesPrimaryAddons) return false
+        }
+        val targetProfileId = profileId?.let(::effectiveProfileId) ?: effectiveProfileId()
         var changed = false
-        store().edit { preferences ->
+        store(targetProfileId).edit { preferences ->
             val orderedUrls = urls.map(::canonicalizeUrl)
             val currentUrls = getCurrentList(preferences).map(::canonicalizeUrl)
             if (orderedUrls == currentUrls) return@edit
@@ -169,10 +182,13 @@ class AddonPreferences @Inject constructor(
         return changed
     }
 
-    suspend fun setAddonEnabledStates(states: Map<String, Boolean>) {
-        val active = profileManager.activeProfile
-        if (active != null && !active.isPrimary && active.usesPrimaryAddons) return
-        store().edit { preferences ->
+    suspend fun setAddonEnabledStates(states: Map<String, Boolean>, profileId: Int? = null) {
+        if (profileId == null) {
+            val active = profileManager.activeProfile
+            if (active != null && !active.isPrimary && active.usesPrimaryAddons) return
+        }
+        val targetProfileId = profileId?.let(::effectiveProfileId) ?: effectiveProfileId()
+        store(targetProfileId).edit { preferences ->
             preferences[addonEnabledStatesKey] = gson.toJson(
                 states.mapKeys { (url, _) -> canonicalizeUrl(url) }
             )
@@ -205,8 +221,9 @@ class AddonPreferences @Inject constructor(
         }
     }
 
-    suspend fun setUserSetNames(names: Map<String, String>) {
-        store().edit { preferences ->
+    suspend fun setUserSetNames(names: Map<String, String>, profileId: Int? = null) {
+        val targetProfileId = profileId?.let(::effectiveProfileId) ?: effectiveProfileId()
+        store(targetProfileId).edit { preferences ->
             preferences[userSetNamesKey] = gson.toJson(
                 names.mapKeys { (url, _) -> canonicalizeUrl(url) }
             )

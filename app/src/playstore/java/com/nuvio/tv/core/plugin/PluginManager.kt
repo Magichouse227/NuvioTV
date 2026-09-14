@@ -28,13 +28,15 @@ class PluginManager {
 
     suspend fun reconcileWithRemoteRepoUrls(
         remotePlugins: List<RemotePluginInfo>,
-        removeMissingLocal: Boolean = true
+        removeMissingLocal: Boolean = true,
+        canApply: () -> Boolean = { true }
     ) = Unit
 
     @JvmName("reconcileWithRemoteRepoUrlStrings")
     suspend fun reconcileWithRemoteRepoUrls(
         remoteUrls: List<String>,
-        removeMissingLocal: Boolean = true
+        removeMissingLocal: Boolean = true,
+        canApply: () -> Boolean = { true }
     ) = Unit
 
     suspend fun refreshRepository(repoId: String): Result<Unit> =

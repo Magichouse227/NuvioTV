@@ -16,6 +16,8 @@ import com.nuvio.tv.domain.model.WatchProgress
 
 @Immutable
 data class HomeUiState(
+    /** Profile that owns every row/current-cache projection in this state. */
+    val contentProfileId: Int? = null,
     val catalogRows: List<CatalogRow> = emptyList(),
     val continueWatchingItems: List<ContinueWatchingItem> = emptyList(),
     val upcomingItems: List<ContinueWatchingItem> = emptyList(),
