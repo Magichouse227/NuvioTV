@@ -61,7 +61,13 @@ data class LastPlaybackDiagnostics(
     val rebufferCount: Int = 0,
     val rebufferTotalMs: Long = 0L,
 
-    val result: String = "Pending"       // "Played", "Error: ..."
+    val result: String = "Pending",       // "Played", "Error: ..."
+
+    // Build provenance is captured when the playback snapshot is created. These stay nullable so
+    // snapshots written before provenance was added remain distinguishable as older reports.
+    val appVersionName: String? = null,
+    val appVersionCode: Long? = null,
+    val testBuildSha: String? = null
 ) {
     /**
      * Serialize to a JSON string for DataStore persistence.
@@ -71,6 +77,9 @@ data class LastPlaybackDiagnostics(
     fun toJson(): String = JSONObject().apply {
         put("timestampMs", timestampMs)
         put("host", host)
+        put("appVersionName", appVersionName ?: JSONObject.NULL)
+        put("appVersionCode", appVersionCode ?: JSONObject.NULL)
+        put("testBuildSha", testBuildSha ?: JSONObject.NULL)
         put("streamUrl", streamUrl ?: JSONObject.NULL)
         put("headersJson", headersJson ?: JSONObject.NULL)
         put("videoBitrate", videoBitrate)
@@ -114,6 +123,17 @@ data class LastPlaybackDiagnostics(
             LastPlaybackDiagnostics(
                 timestampMs = o.optLong("timestampMs", 0L),
                 host = o.optString("host", ""),
+                appVersionName = o.optString("appVersionName", "").let {
+                    if (it.isBlank() || it == "null") null else it
+                },
+                appVersionCode = if (o.has("appVersionCode") && !o.isNull("appVersionCode")) {
+                    o.optLong("appVersionCode", Long.MIN_VALUE).takeIf { it != Long.MIN_VALUE }
+                } else {
+                    null
+                },
+                testBuildSha = o.optString("testBuildSha", "").let {
+                    if (it.isBlank() || it == "null") null else it
+                },
                 streamUrl = o.optString("streamUrl", "").let { if (it.isBlank() || it == "null") null else it },
                 headersJson = o.optString("headersJson", "").let { if (it.isBlank() || it == "null") null else it },
                 videoBitrate = o.optInt("videoBitrate", -1),

@@ -1,7 +1,10 @@
 package loader
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"sync"
 	"testing"
 
@@ -144,6 +147,58 @@ func TestSegmentMapExactFromYencGeometrySkipsGapProbing(t *testing.T) {
 	if c := fetcher.fetchCount(); c > 3 {
 		t.Fatalf("exact geometry should need the planner's probes only, fetched %d articles", c)
 	}
+	if data, err := f.DownloadSegment(context.Background(), 1); err != nil {
+		t.Fatalf("matching yEnc geometry was rejected: %v", err)
+	} else if len(data) != int(fetcher.stride) {
+		t.Fatalf("matching segment length = %d, want %d", len(data), fetcher.stride)
+	}
+}
+
+func TestSegmentMapExactFromKnownIrregularBoundaries(t *testing.T) {
+	fetcher := &varyingGeometryFetcher{lengths: []int64{100, 99, 100}}
+	f := NewFile(context.Background(), testNZBFileWithSegments(120, 120, 120), nil, fetcher)
+
+	if err := f.EnsureSegmentMap(); err != nil {
+		t.Fatalf("EnsureSegmentMap returned error: %v", err)
+	}
+	if got := f.Size(); got != 299 {
+		t.Fatalf("mapped size = %d, want 299", got)
+	}
+	for i, want := range [][2]int64{{0, 100}, {100, 199}, {199, 299}} {
+		start, end, ok := f.SegmentOffsetRange(i)
+		if !ok || start != want[0] || end != want[1] {
+			t.Fatalf("segment %d mapped [%d,%d), want [%d,%d)", i, start, end, want[0], want[1])
+		}
+	}
+	if got := fetcher.fetchCount(); got != 2 {
+		t.Fatalf("exact boundary map fetched %d articles before reading, want first/last only", got)
+	}
+
+	want := append(bytes.Repeat([]byte{'A'}, 100),
+		append(bytes.Repeat([]byte{'B'}, 99), bytes.Repeat([]byte{'C'}, 100)...)...)
+	stream, err := f.OpenStreamCtx(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStreamCtx returned error: %v", err)
+	}
+	defer stream.Close()
+	all, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("whole-file read returned error: %v", err)
+	}
+	if !bytes.Equal(all, want) {
+		t.Fatalf("whole-file bytes differ from the exact irregular release")
+	}
+
+	if _, err := stream.Seek(95, io.SeekStart); err != nil {
+		t.Fatalf("Seek returned error: %v", err)
+	}
+	gotRange := make([]byte, 20)
+	if _, err := io.ReadFull(stream, gotRange); err != nil {
+		t.Fatalf("seeked range read returned error: %v", err)
+	}
+	if !bytes.Equal(gotRange, want[95:115]) {
+		t.Fatalf("seeked range = %q, want %q", gotRange, want[95:115])
+	}
 }
 
 // Without geometry the same file pays a full gap-probe pass on the slow path —
@@ -188,5 +243,167 @@ func TestSegmentMapSnapshotRoundtripsYencGeometry(t *testing.T) {
 		if as != bs || ae != be {
 			t.Fatalf("segment %d restored as [%d,%d), want [%d,%d)", i, bs, be, as, ae)
 		}
+	}
+}
+
+// varyingGeometryFetcher is a complete release whose middle article is longer
+// than the estimator's inherited class size. Every article still has the same
+// decoded length as the map predicts at the segment being read, so checking
+// lengths alone cannot detect that the later article starts at a different
+// logical offset.
+type varyingGeometryFetcher struct {
+	lengths []int64
+	// omitMetadataAfterFirst makes later callbacks act like a cache path that
+	// returns the body without repeating its yEnc headers.
+	omitMetadataAfterFirst bool
+
+	mu      sync.Mutex
+	fetched map[int]int
+	bodies  map[int][]byte
+}
+
+func (f *varyingGeometryFetcher) FetchSegment(_ context.Context, segment *nzb.Segment, _ []string) (pool.SegmentData, error) {
+	idx := int(segment.Number) - 1
+	if idx < 0 || idx >= len(f.lengths) {
+		return pool.SegmentData{}, fmt.Errorf("unexpected segment number %d", segment.Number)
+	}
+	f.mu.Lock()
+	if f.fetched == nil {
+		f.fetched = make(map[int]int)
+	}
+	f.fetched[idx]++
+	call := f.fetched[idx]
+	if f.bodies == nil {
+		f.bodies = make(map[int][]byte)
+	}
+	f.mu.Unlock()
+
+	var offset int64
+	for _, n := range f.lengths[:idx] {
+		offset += n
+	}
+	size := f.lengths[idx]
+	body := bytes.Repeat([]byte{byte('A' + idx)}, int(size))
+	f.mu.Lock()
+	if call == 1 {
+		f.bodies[idx] = append([]byte(nil), body...)
+	}
+	f.mu.Unlock()
+	data := pool.SegmentData{Body: body, Size: size}
+	if !f.omitMetadataAfterFirst || call == 1 {
+		data.YencFileSize = sumLengths(f.lengths)
+		data.YencPartOffset = offset
+	}
+	return data, nil
+}
+
+func sumLengths(lengths []int64) int64 {
+	var total int64
+	for _, n := range lengths {
+		total += n
+	}
+	return total
+}
+
+func (f *varyingGeometryFetcher) firstBody(index int) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.bodies[index]...)
+}
+
+func (f *varyingGeometryFetcher) fetchCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := 0
+	for _, count := range f.fetched {
+		total += count
+	}
+	return total
+}
+
+// A seek after an earlier varying-size article used to fetch a same-sized
+// article at the wrong logical offset. The old length-only check accepted it;
+// the observed yEnc part offset must make the read fail before bytes are
+// copied as a successful frame.
+func TestReadRejectsSameLengthArticleAtWrongYencOffset(t *testing.T) {
+	const declaredBytes = int64(10)
+	fetcher := &varyingGeometryFetcher{lengths: []int64{4, 7, 4}}
+	estimator := NewSegmentSizeEstimator()
+	estimator.Set(declaredBytes, 4)
+	f := NewFile(context.Background(), testNZBFileWithSegments(declaredBytes, declaredBytes, declaredBytes), estimator, fetcher)
+
+	if err := f.EnsureSegmentMap(); err != nil {
+		t.Fatalf("EnsureSegmentMap returned error: %v", err)
+	}
+	if got := f.Size(); got != 12 {
+		t.Fatalf("inherited map size = %d, want 12 for the reproduction", got)
+	}
+
+	buf := bytes.Repeat([]byte{0xcc}, 4)
+	n, err := f.ReadAtCtx(context.Background(), buf, 8)
+	if err == nil {
+		t.Fatal("same-length article at a different yEnc offset was served successfully")
+	}
+	if n != 0 {
+		t.Fatalf("geometry mismatch copied %d bytes before failing", n)
+	}
+	if !bytes.Equal(buf, bytes.Repeat([]byte{0xcc}, len(buf))) {
+		t.Fatal("geometry mismatch changed the destination buffer")
+	}
+}
+
+func TestEnsureSegmentMapRetainsProbeGeometryForLaterRead(t *testing.T) {
+	fetcher := &varyingGeometryFetcher{
+		lengths:                []int64{4, 7, 4, 4},
+		omitMetadataAfterFirst: true,
+	}
+	ctx := WithSkipGapProbing(context.Background(), true)
+	f := NewFile(ctx, testNZBFileWithSegments(10, 10, 10, 10), nil, fetcher)
+
+	if err := f.EnsureSegmentMapCtx(ctx); err != nil {
+		t.Fatalf("EnsureSegmentMap returned error: %v", err)
+	}
+	if got := f.Size(); got != 16 {
+		t.Fatalf("fallback map size = %d, want 16 for the reproduction", got)
+	}
+
+	buf := bytes.Repeat([]byte{0xcc}, 4)
+	n, err := f.ReadAtCtx(context.Background(), buf, 12)
+	if err == nil {
+		t.Fatal("last probe body was served at the wrong mapped offset")
+	}
+	if n != 0 {
+		t.Fatalf("retained probe geometry copied %d bytes before failing", n)
+	}
+	if !bytes.Equal(buf, bytes.Repeat([]byte{0xcc}, len(buf))) {
+		t.Fatal("retained probe geometry changed the destination buffer")
+	}
+}
+
+func TestSegmentReaderRechecksPreDetectionProbeOnCachedRead(t *testing.T) {
+	fetcher := &varyingGeometryFetcher{lengths: []int64{4, 7, 4, 4}}
+	ctx := WithSkipGapProbing(context.Background(), true)
+	f := NewFile(ctx, testNZBFileWithSegments(10, 10, 10, 10), nil, fetcher)
+	if err := f.EnsureSegmentMapCtx(ctx); err != nil {
+		t.Fatalf("EnsureSegmentMap returned error: %v", err)
+	}
+
+	reader := NewSegmentReader(ctx, f, 12)
+	defer reader.Close()
+	reader.mu.Lock()
+	reader.currentSegIdx = 3
+	reader.currentData = fetcher.firstBody(3)
+	reader.segIdx = 3
+	reader.segOff = 0
+	reader.offset = 12
+	reader.mu.Unlock()
+
+	buf := bytes.Repeat([]byte{0xcc}, 4)
+	n, err := reader.Read(buf)
+	if err == nil {
+		t.Fatal("cached pre-detection probe body was served at the wrong mapped offset")
+	}
+	if n != 0 || !bytes.Equal(buf, bytes.Repeat([]byte{0xcc}, len(buf))) {
+		t.Fatalf("cached geometry mismatch returned n=%d or changed destination", n)
 	}
 }

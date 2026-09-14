@@ -162,10 +162,8 @@ internal fun isAudioTrackFailure(errorCode: Int, combinedMessage: String): Boole
 }
 
 internal fun PlaybackException.findInvalidResponseCodeException(): HttpDataSource.InvalidResponseCodeException? {
-    var current: Throwable? = cause
-    while (current != null) {
+    for (current in ThrowableGraphTraversal.walk(this)) {
         if (current is HttpDataSource.InvalidResponseCodeException) return current
-        current = current.cause
     }
     return null
 }
@@ -206,22 +204,11 @@ private fun PlaybackException.recoveryErrorClassification(
         errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED
 ): PlayerRuntimeErrorRecoveryPolicy.ErrorClassification {
     return PlayerRuntimeErrorRecoveryPolicy.classify(
-        messages = recoveryErrorMessages() + additionalMessages,
+        throwable = this,
+        additionalMessages = additionalMessages,
         hasUnsupportedFormatErrorCode = hasUnsupportedFormatErrorCode,
         hasMalformedContainerErrorCode = hasMalformedContainerErrorCode
     )
-}
-
-private fun PlaybackException.recoveryErrorMessages(): List<String> {
-    val messages = buildList {
-        var current: Throwable? = this@recoveryErrorMessages
-        while (current != null) {
-            current.message?.let(::add)
-            add(current.toString())
-            current = current.cause
-        }
-    }
-    return messages
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
@@ -274,10 +261,8 @@ internal fun PlaybackException.toDisplayMessage(context: android.content.Context
 }
 
 private inline fun <reified T : Throwable> Throwable.findCauseOfType(): T? {
-    var current: Throwable? = this
-    while (current != null) {
+    for (current in ThrowableGraphTraversal.walk(this)) {
         if (current is T) return current
-        current = current.cause
     }
     return null
 }
@@ -291,21 +276,16 @@ internal fun Throwable.toDisplayMessage(context: android.content.Context, fallba
 }
 
 private fun Throwable.findMostRelevantCauseMessage(): String? {
-    val candidates = buildList {
-        var current: Throwable? = this@findMostRelevantCauseMessage
-        while (current != null) {
-            current.message
-                ?.trim()
-                ?.takeIf {
-                    it.isNotBlank() &&
-                        !it.equals("Playback error", ignoreCase = true) &&
-                        !it.equals("Source error", ignoreCase = true) &&
-                        !it.equals("Unexpected runtime error", ignoreCase = true)
-                }
-                ?.let(::add)
-            current = current.cause
-        }
-    }
+    val candidates = ThrowableGraphTraversal.walk(this).mapNotNull { throwable ->
+        throwable.message
+            ?.trim()
+            ?.takeIf {
+                it.isNotBlank() &&
+                    !it.equals("Playback error", ignoreCase = true) &&
+                    !it.equals("Source error", ignoreCase = true) &&
+                    !it.equals("Unexpected runtime error", ignoreCase = true)
+            }
+    }.toList()
     return candidates.firstOrNull()
 }
 

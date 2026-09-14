@@ -103,6 +103,31 @@ internal object PlayerRuntimeErrorRecoveryPolicy {
         return ErrorClassification.Retryable
     }
 
+    /**
+     * Classifies a Media3/provider exception without assuming its cause chain is acyclic.
+     *
+     * This overload keeps Throwable graph walking in a small pure helper so the exact parser
+     * classification can be exercised by JVM tests without Android or Media3 runtime classes.
+     */
+    fun classify(
+        throwable: Throwable,
+        additionalMessages: Iterable<String> = emptyList(),
+        hasUnsupportedFormatErrorCode: Boolean = false,
+        hasMalformedContainerErrorCode: Boolean = false,
+    ): ErrorClassification {
+        val throwableMessages = ThrowableGraphTraversal.walk(throwable).flatMap { current ->
+            buildList {
+                current.message?.let(::add)
+                add(current.toString())
+            }
+        }.toList()
+        return classify(
+            messages = throwableMessages + additionalMessages,
+            hasUnsupportedFormatErrorCode = hasUnsupportedFormatErrorCode,
+            hasMalformedContainerErrorCode = hasMalformedContainerErrorCode
+        )
+    }
+
     private val knownMalformedContainerMarkers = listOf(
         "no valid varint length mask found",
         "invalid varint",

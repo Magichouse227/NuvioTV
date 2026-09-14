@@ -19,6 +19,74 @@ class PlayerRuntimeErrorRecoveryPolicyTest {
     }
 
     @Test
+    fun nestedVarintParserCauseIsNotRetryable() {
+        val parserCause = IllegalArgumentException(
+            "No valid varint length mask found after first frame"
+        )
+        val wrappedCause = IllegalStateException("Source error", parserCause)
+        val error = IllegalStateException(
+            "Playback error",
+            wrappedCause
+        )
+
+        assertEquals(
+            PlayerRuntimeErrorRecoveryPolicy.ErrorClassification.MalformedContainer,
+            PlayerRuntimeErrorRecoveryPolicy.classify(throwable = error)
+        )
+    }
+
+    @Test(timeout = 1_000)
+    fun cyclicThrowableCauseChainIsBounded() {
+        val outerCause = IllegalStateException("Source error")
+        val parserCause = IllegalArgumentException(
+            "No valid varint length mask found after first frame"
+        )
+        outerCause.initCause(parserCause)
+        parserCause.initCause(outerCause)
+        val error = IllegalStateException(
+            "Playback error",
+            outerCause
+        )
+
+        assertEquals(
+            PlayerRuntimeErrorRecoveryPolicy.ErrorClassification.MalformedContainer,
+            PlayerRuntimeErrorRecoveryPolicy.classify(throwable = error)
+        )
+    }
+
+    @Test
+    fun suppressedParserCauseIsIncludedWhenClassifying() {
+        val error = IllegalStateException("Playback error").apply {
+            addSuppressed(
+                IllegalArgumentException(
+                    "No valid varint length mask found after first frame"
+                )
+            )
+        }
+
+        assertEquals(
+            PlayerRuntimeErrorRecoveryPolicy.ErrorClassification.MalformedContainer,
+            PlayerRuntimeErrorRecoveryPolicy.classify(throwable = error)
+        )
+    }
+
+    @Test
+    fun throwableGraphTraversalCapsLongCauseChains() {
+        val root = IllegalStateException("root")
+        var current = root
+        repeat(ThrowableGraphTraversal.DEFAULT_MAX_NODES + 20) { index ->
+            val next = IllegalStateException("cause-$index")
+            current.initCause(next)
+            current = next
+        }
+
+        assertEquals(
+            ThrowableGraphTraversal.DEFAULT_MAX_NODES,
+            ThrowableGraphTraversal.walk(root).count()
+        )
+    }
+
+    @Test
     fun malformedContainerErrorCodeIsNotRetryableWithoutParserMessage() {
         assertEquals(
             PlayerRuntimeErrorRecoveryPolicy.ErrorClassification.MalformedContainer,

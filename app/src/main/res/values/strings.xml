@@ -3150,6 +3150,8 @@
     <string name="diag_section_source_hardware_sub">Take a photo of this card if reporting an issue.</string>
     <string name="diag_label_host">Host</string>
     <string name="diag_label_when">When</string>
+    <string name="diag_label_report_build">Report build</string>
+    <string name="diag_label_installed_build">Installed build</string>
     <string name="diag_label_device">Device</string>
     <string name="diag_label_display">Display</string>
     <string name="diag_label_dv7_decoder">DV7 Decoder</string>
@@ -3181,6 +3183,8 @@
     <string name="diag_value_off">Off</string>
     <string name="diag_value_conversions_fmt">%1$d of %2$d successful</string>
     <string name="diag_value_never_rendered">Never rendered</string>
+    <string name="diag_value_unknown">Unknown</string>
+    <string name="diag_value_unknown_older_report">Unknown (older report; build identity was not captured)</string>
 
     <!-- Player errors -->
     <string name="player_error_play_stream_failed">Failed to play selected stream</string>

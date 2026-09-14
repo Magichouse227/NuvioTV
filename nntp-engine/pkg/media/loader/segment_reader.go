@@ -192,6 +192,7 @@ func (r *SegmentReader) readInto(p []byte) (int, error) {
 
 	var data []byte
 	var err error
+	fetched := false
 
 	r.mu.Lock()
 	if r.currentSegIdx == segIdx && r.currentData != nil {
@@ -200,15 +201,18 @@ func (r *SegmentReader) readInto(p []byte) (int, error) {
 	r.mu.Unlock()
 
 	if data == nil {
+		fetched = true
 		logger.Trace("SegmentReader readInto: calling DownloadSegment", "file", r.file.Name(), "segIdx", segIdx, "segOff", segOff)
 		data, err = r.file.DownloadSegment(r.ctx, segIdx)
 		logger.Trace("SegmentReader readInto: DownloadSegment returned", "file", r.file.Name(), "segIdx", segIdx, "err", err, "dataLen", len(data))
 		if err != nil {
 			return 0, err
 		}
-		if err := r.file.verifyMappedSegmentLength(segIdx, data); err != nil {
-			return 0, err
-		}
+	}
+	if err := r.file.verifyMappedSegmentLength(segIdx, data); err != nil {
+		return 0, err
+	}
+	if fetched {
 		r.mu.Lock()
 		if !r.closed && r.segIdx == segIdx {
 			r.currentSegIdx = segIdx

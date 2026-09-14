@@ -60,6 +60,7 @@ import androidx.media3.extractor.ts.TsExtractor
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.R
 import com.nuvio.tv.core.diagnostics.DiagnosticLog
 import com.nuvio.tv.core.player.DolbyVisionCodecFallback
@@ -430,6 +431,9 @@ internal fun PlayerRuntimeController.initializePlayer(
             var currentDiagnostics = LastPlaybackDiagnostics(
                 timestampMs = System.currentTimeMillis(),
                 host = url.safeHost(),
+                appVersionName = BuildConfig.VERSION_NAME,
+                appVersionCode = BuildConfig.VERSION_CODE.toLong(),
+                testBuildSha = BuildConfig.TEST_BUILD_SHA,
                 streamUrl = url,
                 headersJson = org.json.JSONObject(headers).toString(),
                 hdrCapsKnown = dv7AutoResult?.hdrCapsKnown ?: false,
@@ -1887,6 +1891,9 @@ internal fun PlayerRuntimeController.initializePlayer(
             val diagnostics = LastPlaybackDiagnostics(
                 timestampMs = System.currentTimeMillis(),
                 host = currentStreamUrl.safeHost(),
+                appVersionName = BuildConfig.VERSION_NAME,
+                appVersionCode = BuildConfig.VERSION_CODE.toLong(),
+                testBuildSha = BuildConfig.TEST_BUILD_SHA,
                 result = "Error: $displayError"
             )
             lastPlaybackDiagnosticsForReport = diagnostics

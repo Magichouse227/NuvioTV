@@ -56,7 +56,7 @@ func startCountingNNTPServer(t *testing.T, allMissing bool) (*countingNNTPServer
 						if srv.allMissing {
 							_, _ = c.Write([]byte("430 No Such Article\r\n"))
 						} else {
-							_, _ = c.Write([]byte("222 Body follows\r\n=ybegin size=10 line=128 name=test\r\ndata\r\n=yend size=10\r\n.\r\n"))
+							_, _ = c.Write([]byte("222 Body follows\r\n=ybegin part=1 total=1 line=128 size=4 name=test\r\n=ypart begin=1 end=4\r\n*+,-\r\n=yend size=4 part=1 pcrc32=8bb98613\r\n.\r\n"))
 						}
 					case strings.HasPrefix(cmd, "STAT"):
 						srv.stats.Add(1)

@@ -29,6 +29,7 @@ import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.R
 import com.nuvio.tv.core.player.DolbyVisionCodecFallback
 import com.nuvio.tv.core.player.LastPlaybackDiagnostics
@@ -90,6 +91,19 @@ internal fun LazyListScope.diagnosticsCardItems(
             )
             DiagnosticRow(stringResource(R.string.diag_label_host), diagnostics.host)
             DiagnosticRow(stringResource(R.string.diag_label_when), formatTimestamp(diagnostics.timestampMs))
+            DiagnosticRow(
+                stringResource(R.string.diag_label_report_build),
+                formatReportBuildIdentity(diagnostics)
+            )
+            DiagnosticRow(
+                stringResource(R.string.diag_label_installed_build),
+                formatBuildIdentity(
+                    versionName = BuildConfig.VERSION_NAME,
+                    versionCode = BuildConfig.VERSION_CODE.toLong(),
+                    testBuildSha = BuildConfig.TEST_BUILD_SHA,
+                    unknownLabel = stringResource(R.string.diag_value_unknown)
+                )
+            )
             DiagnosticRow(stringResource(R.string.diag_label_device), deviceName(unknownLabel))
             DiagnosticRow(
                 stringResource(R.string.diag_label_display),
@@ -280,6 +294,33 @@ private fun DiagnosticRow(
 private fun formatTimestamp(ms: Long): String {
     if (ms == 0L) return "—"
     return SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(ms))
+}
+
+@Composable
+private fun formatReportBuildIdentity(diagnostics: LastPlaybackDiagnostics): String {
+    val unknownReport = stringResource(R.string.diag_value_unknown_older_report)
+    return formatBuildIdentity(
+        versionName = diagnostics.appVersionName,
+        versionCode = diagnostics.appVersionCode,
+        testBuildSha = diagnostics.testBuildSha,
+        unknownLabel = unknownReport
+    )
+}
+
+private fun formatBuildIdentity(
+    versionName: String?,
+    versionCode: Long?,
+    testBuildSha: String?,
+    unknownLabel: String
+): String {
+    val version = when {
+        !versionName.isNullOrBlank() && versionCode != null -> "$versionName ($versionCode)"
+        !versionName.isNullOrBlank() -> versionName
+        versionCode != null -> "code $versionCode"
+        else -> null
+    }
+    val build = testBuildSha?.trim()?.takeIf { it.isNotBlank() }?.let { "TEST_BUILD_SHA $it" }
+    return listOfNotNull(version, build).joinToString(" • ").ifBlank { unknownLabel }
 }
 
 /** "Manufacturer Model", de-duplicated (e.g. avoids "Xiaomi Xiaomi ..."). */

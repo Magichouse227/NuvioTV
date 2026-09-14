@@ -46,11 +46,11 @@ func (g yencGeometry) empty() bool {
 }
 
 // exactSizesFromYencGeometry builds the segment map from the yEnc headers
-// instead of measuring and scaling, when the recorded offsets prove a uniform
-// stride. One article at index i>0 pins the stride (offset i*stride), the
-// declared file size pins the total and therefore the tail — the two probes
-// the planner already fetches (head class + physical last) are enough, exactly,
-// with no class clustering, no ratio scaling and no gap probing.
+// instead of measuring and scaling, when the recorded offsets prove all
+// boundaries. A first/last pair can prove an irregular three-part layout; the
+// uniform-stride path below handles the common case where those are not enough
+// to expose every boundary. The planner's existing probes remain sufficient
+// whenever either proof applies, with no class clustering or ratio scaling.
 //
 // Every check is a hard bail to the measuring path: a recorded offset off the
 // stride grid (non-uniform post), an implausible tail, or a probed article
@@ -61,6 +61,9 @@ func exactSizesFromYencGeometry(segments []*Segment, probedByIndex map[int]int64
 	n := len(segments)
 	if n < 2 || geo.fileSize <= 0 || len(geo.offsets) == 0 {
 		return nil, false
+	}
+	if sizes, ok := exactSizesFromKnownYencBoundaries(segments, probedByIndex, geo); ok {
+		return sizes, true
 	}
 
 	var stride int64
@@ -110,6 +113,65 @@ func exactSizesFromYencGeometry(segments []*Segment, probedByIndex map[int]int64
 		sizes[i] = stride
 	}
 	sizes[n-1] = last
+	return sizes, true
+}
+
+// exactSizesFromKnownYencBoundaries reconstructs irregular articles when the
+// probes already expose every boundary. In particular, a three-part file can
+// have first=[0,100), last=[199,299), and therefore prove the middle interval
+// [100,199) without downloading that article. Unknown boundaries still bail
+// out; this is deliberately not an inference or a broad map rewrite.
+func exactSizesFromKnownYencBoundaries(segments []*Segment, probedByIndex map[int]int64, geo yencGeometry) ([]int64, bool) {
+	n := len(segments)
+	if n < 2 || geo.fileSize <= 0 {
+		return nil, false
+	}
+
+	bounds := make([]int64, n+1)
+	known := make([]bool, n+1)
+	setBoundary := func(index int, value int64) bool {
+		if index < 0 || index > n || value < 0 {
+			return false
+		}
+		if known[index] && bounds[index] != value {
+			return false
+		}
+		bounds[index] = value
+		known[index] = true
+		return true
+	}
+	if !setBoundary(n, geo.fileSize) {
+		return nil, false
+	}
+
+	for idx, offset := range geo.offsets {
+		if idx < 0 || idx >= n || !setBoundary(idx, offset) {
+			return nil, false
+		}
+	}
+	for idx, decoded := range probedByIndex {
+		if idx < 0 || idx >= n || decoded <= 0 {
+			return nil, false
+		}
+		offset, ok := geo.offsets[idx]
+		if !ok || offset < 0 || offset > geo.fileSize || decoded > geo.fileSize-offset {
+			return nil, false
+		}
+		if !setBoundary(idx+1, offset+decoded) {
+			return nil, false
+		}
+	}
+
+	sizes := make([]int64, n)
+	for i := 0; i < n; i++ {
+		if !known[i] || !known[i+1] || bounds[i] >= bounds[i+1] {
+			return nil, false
+		}
+		sizes[i] = bounds[i+1] - bounds[i]
+	}
+	if bounds[n] != geo.fileSize {
+		return nil, false
+	}
 	return sizes, true
 }
 

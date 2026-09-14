@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.SeekParameters
 import com.nuvio.tv.R
+import com.nuvio.tv.BuildConfig
 import com.nuvio.tv.core.player.LastPlaybackDiagnostics
 import com.nuvio.tv.core.tracking.TRACKING_SCROBBLE_DIAGNOSTIC_TAG
 import com.nuvio.tv.core.tracking.TrackingMediaKind
@@ -398,6 +399,9 @@ internal fun PlayerRuntimeController.submitPlaybackIssueReport() {
         ?: LastPlaybackDiagnostics(
             timestampMs = System.currentTimeMillis(),
             host = currentStreamUrl.reportSafeHost(),
+            appVersionName = BuildConfig.VERSION_NAME,
+            appVersionCode = BuildConfig.VERSION_CODE.toLong(),
+            testBuildSha = BuildConfig.TEST_BUILD_SHA,
             result = state.error?.let { "Error: $it" } ?: "Pending"
         )
     val reportError = lastPlaybackIssueError

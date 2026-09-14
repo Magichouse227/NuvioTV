@@ -3,13 +3,9 @@ package decode
 import (
 	"errors"
 	"io"
-	"regexp"
-	"strconv"
 
 	"github.com/javi11/rapidyenc"
 )
-
-var sizeMismatchRE = regexp.MustCompile(`expected size (\d+) but got (\d+)`)
 
 type Frame struct {
 	Data     []byte
@@ -23,8 +19,6 @@ type Frame struct {
 	FileSize   int64
 	PartOffset int64
 }
-
-const maxDecodeSizeTolerance = 256
 
 // defaultDecodeSizeHint sizes the buffer when the caller has no NZB byte count
 // to offer: the ~700-800 KB article the typical release posts.
@@ -84,19 +78,9 @@ func DecodeToBytesSized(r io.Reader, sizeHint int64) (*Frame, error) {
 	if errors.Is(err, io.EOF) {
 		return frameWithMeta(dec, buf, n), nil
 	}
-	if sub := sizeMismatchRE.FindStringSubmatch(err.Error()); len(sub) == 3 {
-		expected, _ := strconv.ParseInt(sub[1], 10, 64)
-		got, _ := strconv.ParseInt(sub[2], 10, 64)
-		shortfall := expected - got
-		if shortfall > 0 && shortfall <= maxDecodeSizeTolerance && int64(n) == got {
-			// Keep the actually-decoded bytes. The =yend "size" is frequently a
-			// nominal/rounded value the poster wrote (e.g. 768000) while the real
-			// payload is a few bytes smaller; the decoded bytes are the true file
-			// content. Padding up to the declared size would splice phantom bytes
-			// at every segment boundary and corrupt the concatenated archive.
-			return frameWithMeta(dec, buf, n), nil
-		}
-	}
+	// A size mismatch is not a harmless rounding difference: rapidyenc checks
+	// it before checking the trailer CRC, so accepting a shortfall here would
+	// bypass integrity verification and cache a truncated frame as successful.
 	return nil, err
 }
 

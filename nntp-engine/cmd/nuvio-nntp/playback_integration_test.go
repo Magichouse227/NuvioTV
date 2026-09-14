@@ -116,7 +116,7 @@ func TestSessionCacheReusesDownloadedArticle(t *testing.T) {
 
 func TestProviderConnectionsAreReusedAcrossSessions(t *testing.T) {
 	media := append([]byte{0x1a, 0x45, 0xdf, 0xa3}, bytes.Repeat([]byte("reused-nntp"), 128)...)
-	nntpAddress, _, connections, stopNNTP := startFakeNNTPServer(t, media)
+	nntpAddress, _, _, stopNNTP := startFakeNNTPServer(t, media)
 	defer stopNNTP()
 
 	nzbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -144,16 +144,25 @@ func TestProviderConnectionsAreReusedAcrossSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(first.clients) != 1 || first.clients[0] == nil {
+		t.Fatalf("first session did not retain its provider client pool: %+v", first.clients)
+	}
+	firstProviderPool := first.clients[0]
 	if !registry.delete(first.id) {
 		t.Fatal("first session was not deleted")
 	}
-	opened := connections()
+	// Closing a session cancels any still-unclaimed read-ahead. Its in-flight
+	// BODY connection is deliberately discarded, so a fresh socket is allowed
+	// even though the provider client pool itself remains cached and reusable.
 	second, err := registry.create(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := connections(); got != opened {
-		t.Fatalf("NNTP connections after second session = %d, want reused total %d", got, opened)
+	if len(second.clients) != 1 {
+		t.Fatalf("second session did not retain its provider client pool: %+v", second.clients)
+	}
+	if second.clients[0] != firstProviderPool {
+		t.Fatalf("provider client pool was not reused across sessions: first=%p second=%p", firstProviderPool, second.clients[0])
 	}
 	registry.delete(second.id)
 }

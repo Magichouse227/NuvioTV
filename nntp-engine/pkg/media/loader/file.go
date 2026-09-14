@@ -144,10 +144,13 @@ type File struct {
 	// yencGeo accumulates the "=ybegin size=" / "=ypart begin=" geometry of
 	// every article decoded before the segment map exists. The articles carry
 	// the exact map the poster wrote; collecting it costs nothing on downloads
-	// already happening. Guarded by yencGeoMu, not mu, so a fetch completion
+	// already happening. yencObserved retains the metadata by segment after
+	// detection too, so a probe or cache hit cannot later bypass geometry
+	// validation at a read. Guarded by yencGeoMu, not mu, so a fetch completion
 	// never contends with map detection.
-	yencGeoMu sync.Mutex
-	yencGeo   yencGeometry
+	yencGeoMu    sync.Mutex
+	yencGeo      yencGeometry
+	yencObserved map[int]yencObservation
 
 	firstStatMu      sync.Mutex
 	firstStatChecked bool
@@ -157,6 +160,12 @@ type File struct {
 	// yencName is the "=ybegin name=" seen on the last decoded article of this
 	// file. Every article of a file repeats it, so one fetch is enough.
 	yencName atomic.Value
+}
+
+type yencObservation struct {
+	fileSize   int64
+	partOffset int64
+	decodedLen int64
 }
 
 type inflightSegmentDownload struct {
@@ -723,14 +732,14 @@ func (f *File) segmentDecodedLen(idx int) int64 {
 }
 
 // verifyMappedSegmentLength refuses a downloaded segment whose decoded length
-// disagrees with the segment map. The map can be estimated — gap probing is
-// skipped on archive reads, and unprobed segments inherit a class
-// representative's size — and serving through a mismatch silently shifts every
-// byte after it: the demuxer desyncs and the served range no longer matches
-// the release. A loud error turns that silent corruption into a failover, and
-// the Warn names the segment so the estimator can be fixed from the field.
-// Before the map is detected, mapped lengths are still encoded sizes, so a
-// mismatch there is expected and not checked.
+// or retained yEnc geometry disagrees with the segment map. The map can be
+// estimated — gap probing is skipped on archive reads, and unprobed segments
+// inherit a class representative's size — and serving through a mismatch
+// silently shifts every byte after it: the demuxer desyncs and the served range
+// no longer matches the release. A loud error turns that silent corruption into
+// a failover, and the Warn names the segment so the estimator can be fixed from
+// the field. Before the map is detected, mapped lengths are still encoded sizes,
+// so a mismatch there is expected and not checked.
 //
 // The refusal is also the one place holding the ground truth, so it does not
 // just refuse: it throws the disproved map away (distrustSegmentMap) and lets
@@ -751,12 +760,26 @@ func (f *File) verifyMappedSegmentLength(index int, data []byte) error {
 	}
 	mapped := f.segmentDecodedLen(index)
 	if int64(len(data)) == mapped {
-		return nil
+		return f.verifyObservedYencGeometry(index, int64(len(data)))
 	}
 	logger.Warn("Segment decoded length disagrees with the segment map",
 		"file", f.Name(), "index", index, "mapped", mapped, "decoded", len(data))
 	f.distrustSegmentMap(index, int64(len(data)))
 	return fmt.Errorf("segment %d decoded %d bytes but is mapped as %d: refusing to serve shifted bytes", index, len(data), mapped)
+}
+
+// verifyObservedYencGeometry applies metadata retained when this segment was
+// fetched, including when that fetch happened before map detection. A loader
+// read can reuse the bytes through a SegmentReader or the provider cache, so
+// checking only the fresh SegmentData path is not sufficient.
+func (f *File) verifyObservedYencGeometry(index int, decodedLen int64) error {
+	f.yencGeoMu.Lock()
+	observed, ok := f.yencObserved[index]
+	f.yencGeoMu.Unlock()
+	if !ok {
+		return nil
+	}
+	return f.verifyMappedYencValues(index, observed.fileSize, observed.partOffset, decodedLen)
 }
 
 // maxSegmentMapRemaps bounds how often one file may throw its map away and
@@ -1208,29 +1231,101 @@ func (f *File) doDownloadSegmentViaFetcher(ctx context.Context, index int) ([]by
 	if !shouldPersistDownloadedSegment(downloadCtx) {
 		return nil, downloadCtx.Err()
 	}
+	f.recordYencGeometry(index, data)
+	if err := f.verifyMappedYencGeometry(index, data); err != nil {
+		// Do not publish an article whose bytes are valid but belong at a
+		// different logical offset. The in-flight result is completed with
+		// this error, so no reader copies it as a successful segment.
+		return nil, err
+	}
 	if name := strings.TrimSpace(data.FileName); name != "" {
 		f.yencName.Store(name)
 	}
-	f.recordYencGeometry(index, data)
 	// Don't cache here when using the pool fetcher: the pool already cached by message ID.
 	// Caching again would double memory use (same segment in pool cache + loader segCache) and double-count the budget.
 	return data.Body, nil
 }
 
-// recordYencGeometry keeps an article's declared file size and part offset for
-// the map builder. Only useful before the map exists, so it stops accumulating
-// once detection is done. Articles of one file that disagree on the file size
-// mean the headers cannot be trusted; the whole geometry is poisoned rather
-// than mixed.
+// verifyMappedYencGeometry checks the exact location declared by a decoded
+// yEnc article against the already-built segment map. Length alone is not
+// enough: a same-sized article can be fetched after an earlier varying-size
+// article and otherwise be copied at the wrong logical offset. Articles
+// without usable yEnc geometry keep the existing fast path; the map builder
+// already collects geometry while it is being detected.
+func (f *File) verifyMappedYencGeometry(index int, data pool.SegmentData) error {
+	if data.YencFileSize <= 0 {
+		return nil
+	}
+	return f.verifyMappedYencValues(index, data.YencFileSize, data.YencPartOffset, int64(len(data.Body)))
+}
+
+func (f *File) verifyMappedYencValues(index int, fileSize, partOffset, decodedLen int64) error {
+	f.mu.Lock()
+	detected := f.detected
+	var mappedTotal, mappedStart, mappedEnd int64
+	if detected && index >= 0 && index < len(f.segments) {
+		mappedTotal = f.totalSize
+		mappedStart = f.segments[index].StartOffset
+		mappedEnd = f.segments[index].EndOffset
+	}
+	f.mu.Unlock()
+	if !detected {
+		return nil
+	}
+
+	offsetEnd := partOffset + decodedLen
+	if partOffset != mappedStart ||
+		fileSize != mappedTotal ||
+		partOffset < 0 ||
+		decodedLen <= 0 ||
+		offsetEnd < partOffset ||
+		offsetEnd > fileSize ||
+		offsetEnd != mappedEnd {
+		logger.Warn("Decoded yEnc geometry disagrees with the segment map",
+			"file", f.Name(),
+			"index", index,
+			"mapped_file_size", mappedTotal,
+			"yenc_file_size", fileSize,
+			"mapped_offset", mappedStart,
+			"yenc_offset", partOffset,
+			"mapped_length", mappedEnd-mappedStart,
+			"decoded_length", decodedLen)
+		return fmt.Errorf("segment %d yEnc geometry [%d,%d)/%d disagrees with mapped [%d,%d)/%d: refusing to serve bytes at a wrong logical offset",
+			index,
+			partOffset,
+			offsetEnd,
+			fileSize,
+			mappedStart,
+			mappedEnd,
+			mappedTotal)
+	}
+	return nil
+}
+
+// recordYencGeometry keeps an article's declared file size, part offset, and
+// decoded length. The per-index observation remains available after detection
+// for read-time checks; the aggregate geometry is only accumulated while the
+// map is being built. Articles of one file that disagree on the file size mean
+// the headers cannot be trusted; the aggregate geometry is poisoned rather than
+// mixed.
 func (f *File) recordYencGeometry(index int, data pool.SegmentData) {
 	if data.YencFileSize <= 0 || index < 0 || index >= len(f.segments) {
 		return
 	}
-	if f.SegmentMapDetected() {
-		return
-	}
+	detected := f.SegmentMapDetected()
 	f.yencGeoMu.Lock()
 	defer f.yencGeoMu.Unlock()
+	if f.yencObserved == nil {
+		f.yencObserved = make(map[int]yencObservation)
+	}
+	f.yencObserved[index] = yencObservation{
+		fileSize:   data.YencFileSize,
+		partOffset: data.YencPartOffset,
+		decodedLen: int64(len(data.Body)),
+	}
+	if detected {
+		return
+	}
 	switch {
 	case f.yencGeo.fileSize == 0:
 		f.yencGeo.fileSize = data.YencFileSize
