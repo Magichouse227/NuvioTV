@@ -45,7 +45,9 @@ data class Meta(
     val hasLandscapePoster: Boolean? = null,
     val hasLogo: Boolean? = null,
     val hasLinks: Boolean? = null,
-    val hasVideos: Boolean? = null
+    val hasVideos: Boolean? = null,
+    val budget: Long? = null,
+    val revenue: Long? = null
 ) {
     val apiType: String
         get() = type.toApiString(rawType)
@@ -196,7 +198,9 @@ data class Video(
     val runtime: Int? = null, // episode runtime in minutes
     /** Per-episode rating supplied by the addon, when it provides one. */
     val rating: Double? = null,
-    val available: Boolean? = null
+    val available: Boolean? = null,
+    /** TMDB rating kept separate from addon/IMDb ratings for correct attribution. */
+    val tmdbRating: Double? = null
 )
 
 @Immutable

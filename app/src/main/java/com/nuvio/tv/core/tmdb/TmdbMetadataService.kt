@@ -473,6 +473,8 @@ class TmdbMetadataService(
                     releaseInfo = releaseInfo,
                     rating = rating,
                     runtimeMinutes = runtime,
+                    budget = details?.budget?.takeIf { it > 0 },
+                    revenue = details?.revenue?.takeIf { it > 0 },
                     director = exposedDirector,
                     writer = exposedWriter,
                     productionCompanies = productionCompanies,
@@ -1665,7 +1667,9 @@ data class TmdbEnrichment(
     val collectionName: String?,
     val originalTitle: String? = null,
     val alternativeTitles: List<String> = emptyList(),
-    val trailers: List<MetaTrailer> = emptyList()
+    val trailers: List<MetaTrailer> = emptyList(),
+    val budget: Long? = null,
+    val revenue: Long? = null
 )
 
 data class TmdbEpisodeEnrichment(
@@ -1673,7 +1677,8 @@ data class TmdbEpisodeEnrichment(
     val overview: String?,
     val thumbnail: String?,
     val airDate: String?,
-    val runtimeMinutes: Int?
+    val runtimeMinutes: Int?,
+    val rating: Double? = null
 )
 
 enum class TmdbEntityKind(val routeValue: String) {
@@ -1738,7 +1743,8 @@ private fun TmdbEpisode.toEnrichment(): TmdbEpisodeEnrichment {
         overview = overview,
         thumbnail = thumbnail,
         airDate = airDate,
-        runtimeMinutes = runtime
+        runtimeMinutes = runtime,
+        rating = voteAverage?.takeIf { it > 0 && it <= 10 }
     )
 }
 

@@ -94,12 +94,14 @@ class MetaDetailsViewModel @Inject constructor(
     private val traktSettingsDataStore: TraktSettingsDataStore,
     private val layoutPreferenceDataStore: LayoutPreferenceDataStore,
     private val playerSettingsDataStore: PlayerSettingsDataStore,
+    private val enhancedSettingsDataStore: com.nuvio.tv.data.local.EnhancedSettingsDataStore,
     private val profileManager: ProfileManager,
     private val metaDetailsSessionState: MetaDetailsSessionState,
     private val watchedSeriesStateHolder: com.nuvio.tv.data.local.WatchedSeriesStateHolder,
     val posterOptions: com.nuvio.tv.ui.components.posteroptions.PosterOptionsController,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
+    val enhancedSettings = enhancedSettingsDataStore.settings
     private val itemId: String = savedStateHandle["itemId"] ?: ""
     private val itemType: String = savedStateHandle["itemType"] ?: ""
     private val preferredAddonBaseUrl: String? = savedStateHandle["addonBaseUrl"]
@@ -1463,7 +1465,7 @@ class MetaDetailsViewModel @Inject constructor(
             ?: return meta
 
         val isSeries = meta.apiType in listOf("series", "tv")
-        val needsEpisodes = (settings.useEpisodes || settings.useReleaseDates) && isSeries
+        val needsEpisodes = (settings.useEpisodes || settings.useReleaseDates || settings.useEpisodeRatings) && isSeries
 
         // Fetch main enrichment and episode enrichment in parallel.
         val (enrichment, episodeMap) = coroutineScope {
@@ -1517,7 +1519,9 @@ class MetaDetailsViewModel @Inject constructor(
                 status = enrichment.status ?: updated.status,
                 ageRating = enrichment.ageRating ?: updated.ageRating,
                 country = enrichment.countries?.joinToString(", ") ?: updated.country,
-                language = enrichment.language ?: updated.language
+                language = enrichment.language ?: updated.language,
+                budget = enrichment.budget ?: updated.budget,
+                revenue = enrichment.revenue ?: updated.revenue
             )
         }
 
@@ -1583,7 +1587,8 @@ class MetaDetailsViewModel @Inject constructor(
                             useTmdbReleaseDates = settings.useReleaseDates
                         ),
                         thumbnail = if (settings.useEpisodes) ep?.thumbnail ?: video.thumbnail else video.thumbnail,
-                        runtime = if (settings.useEpisodes) ep?.runtimeMinutes ?: video.runtime else video.runtime
+                        runtime = if (settings.useEpisodes) ep?.runtimeMinutes ?: video.runtime else video.runtime,
+                        tmdbRating = if (settings.useEpisodeRatings) ep?.rating else null
                     )
                 }
             )

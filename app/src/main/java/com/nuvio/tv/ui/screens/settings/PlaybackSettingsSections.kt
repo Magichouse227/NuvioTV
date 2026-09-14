@@ -525,6 +525,8 @@ internal fun PlaybackSettingsSections(
                 )
             }
 
+            item(key = "enhanced_random_playback") { EnhancedPlaybackSettingsRow() }
+
             autoPlaySettingsItems(
                 playerSettings = playerSettings,
                 onShowModeDialog = onShowStreamAutoPlayModeDialog,
