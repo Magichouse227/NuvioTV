@@ -38,6 +38,8 @@ class DiagnosticReportStore @Inject constructor(
         private const val FILE_NAME = "diagnostic_reports_v2"
         private const val SESSION_FILE_NAME = "diagnostic_session_v2"
         private const val LOG_FILE_NAME = "diagnostic_log_v2"
+        private const val LEGACY_CRASH_FILE_NAME = "pending_crash_report"
+        private const val LEGACY_CRASH_KEY_ALIAS = "nuvio_crash_report"
         private const val MAX_REPORTS = 12
         private const val MAX_REPORT_CHARS = 48_000
         private const val MAX_LOG_ENTRIES = 240
@@ -85,6 +87,7 @@ class DiagnosticReportStore @Inject constructor(
         try {
             withContext(Dispatchers.IO) {
                 synchronized(diskLock) {
+                    migrateLegacyCrashReportBlocking()
                     DiagnosticLog.restore(readLogBlocking())
                     beginProcessSessionBlocking()
                 }
@@ -142,6 +145,35 @@ class DiagnosticReportStore @Inject constructor(
             )
         }
         writeSession("foreground")
+    }
+
+    /**
+     * Imports exactly the old single encrypted pending-crash record. It deliberately only reads
+     * the pre-existing Keystore alias; a missing/unreadable legacy key leaves the legacy file in
+     * place rather than generating a replacement key or accepting plaintext.
+     */
+    private fun migrateLegacyCrashReportBlocking() {
+        val legacyFile = context.filesDir.resolve(LEGACY_CRASH_FILE_NAME)
+        if (!legacyFile.exists()) return
+        val legacyBody = runCatching { decryptLegacyCrash(legacyFile.readBytes()) }.getOrNull() ?: return
+        val sanitizedBody = DiagnosticSanitizer.text(legacyBody, MAX_REPORT_CHARS)
+        if (sanitizedBody.isBlank()) return
+        val reports = readBlocking()
+        val alreadyImported = reports.any { it.type == "managed_crash" && it.body == sanitizedBody }
+        if (!alreadyImported) {
+            val timestamp = legacyFile.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
+            writeBlocking(
+                reports + StoredDiagnosticReport(
+                    id = newId(),
+                    type = "managed_crash",
+                    createdAtMs = timestamp,
+                    summary = "Imported saved managed crash report",
+                    body = sanitizedBody
+                )
+            )
+        }
+        // Only clear after the queue commit above completed, or after proving it was imported.
+        legacyFile.delete()
     }
 
     fun markAppForeground() = updateSession("foreground")
@@ -246,8 +278,8 @@ class DiagnosticReportStore @Inject constructor(
             ?.lineSequence()
             ?.map { DiagnosticSanitizer.text(it, 1_000) }
             ?.filter(String::isNotBlank)
-            ?.takeLast(MAX_LOG_ENTRIES)
             ?.toList()
+            ?.takeLast(MAX_LOG_ENTRIES)
             ?: emptyList()
 
     private fun writeLogBlocking(entries: List<String>) {
@@ -305,6 +337,21 @@ class DiagnosticReportStore @Inject constructor(
         return String(cipher.doFinal(encoded.copyOfRange(1 + ivLength, encoded.size)), StandardCharsets.UTF_8)
     }
 
+    private fun decryptLegacyCrash(encoded: ByteArray): String {
+        if (encoded.size < 13) error("Invalid legacy crash report")
+        val ivLength = encoded[0].toInt()
+        if (ivLength !in 12..16 || encoded.size <= ivLength) error("Invalid legacy crash report")
+        val legacyKey = legacyKeyOrNull() ?: error("Legacy crash key is unavailable")
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(
+                Cipher.DECRYPT_MODE,
+                legacyKey,
+                GCMParameterSpec(128, encoded.copyOfRange(1, 1 + ivLength))
+            )
+        }
+        return String(cipher.doFinal(encoded.copyOfRange(1 + ivLength, encoded.size)), StandardCharsets.UTF_8)
+    }
+
     private fun key(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
@@ -318,5 +365,10 @@ class DiagnosticReportStore @Inject constructor(
                     .build()
             )
         }.generateKey()
+    }
+
+    private fun legacyKeyOrNull(): SecretKey? {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        return keyStore.getKey(LEGACY_CRASH_KEY_ALIAS, null) as? SecretKey
     }
 }
