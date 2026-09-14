@@ -191,7 +191,8 @@ android {
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.getByName(if (useDebugReleaseSigning) "debug" else "release")
+            if (useDebugReleaseSigning) applicationIdSuffix = ".enhanced.preview"
             isDebuggable = false
             isMinifyEnabled = false
 
