@@ -94,6 +94,7 @@ object M3uParser {
         }
 
     fun networkUrl(value: String, base: String?): String? = runCatching {
+        require(value.isNotBlank())
         val uri = if (base == null) URI(value.trim()) else URI(base).resolve(value.trim())
         uri.takeIf { it.scheme?.lowercase() in setOf("http", "https", "rtsp") && !it.host.isNullOrBlank() }?.toASCIIString()
     }.getOrNull()

@@ -1,5 +1,10 @@
 package com.nuvio.tv
 
+import kotlinx.coroutines.flow.catch
+
+import com.nuvio.tv.core.livetv.LiveTvPreferences
+import androidx.compose.material.icons.filled.LiveTv
+
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -250,6 +255,8 @@ private data class MainUiPrefs(
 
 @AndroidEntryPoint
 open class MainActivity : ComponentActivity() {
+
+    @Inject lateinit var liveTvPreferences: LiveTvPreferences
 
     @Inject
     lateinit var themeDataStore: ThemeDataStore
@@ -998,11 +1005,16 @@ open class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    val rootRoutes = remember(discoverLocation) {
+                    val liveTvVisible by remember {
+                        liveTvPreferences.config.map { it.showInNavigation && it.sources.isNotEmpty() }
+                            .catch { emit(false) }
+                    }.collectAsState(initial = false)
+                    val rootRoutes = remember(discoverLocation, liveTvVisible) {
                         buildSet {
                             add(Screen.Home.route)
                             add(Screen.Search.route)
                             add(Screen.Library.route)
+                            if (liveTvVisible) add(Screen.LiveTv.route)
                             add(Screen.Settings.route)
                             if (discoverLocation == DiscoverLocation.IN_SIDEBAR) {
                                 add(Screen.Discover.route)
@@ -1021,6 +1033,7 @@ open class MainActivity : ComponentActivity() {
                         strNavSearch,
                         strNavLibrary,
                         strNavSettings,
+                        liveTvVisible,
                         discoverLocation
                     ) {
                         buildList {
@@ -1054,6 +1067,7 @@ open class MainActivity : ComponentActivity() {
                                     iconRes = R.raw.sidebar_library
                                 )
                             )
+                            if (liveTvVisible) add(DrawerItem(route = Screen.LiveTv.route, label = "Live TV", icon = Icons.Default.LiveTv))
                             add(
                                 DrawerItem(
                                     route = Screen.Settings.route,

@@ -34,7 +34,7 @@ jobs:
           touch local.properties local.dev.properties
           chmod +x gradlew
       - name: Verify and build
-        run: ./gradlew :app:testFullDebugUnitTest --tests 'com.nuvio.tv.ui.screens.settings.MemoryBudgetTest' --tests 'com.nuvio.tv.core.performance.*' :app:assembleFullDebug --stacktrace
+        run: ./gradlew :app:testFullDebugUnitTest --tests 'com.nuvio.tv.ui.screens.settings.MemoryBudgetTest' --tests 'com.nuvio.tv.core.performance.*' --tests 'com.nuvio.tv.core.livetv.*' :app:assembleFullDebug --stacktrace
       - name: Save preview APK and test reports
         if: always()
         uses: actions/upload-artifact@v4
