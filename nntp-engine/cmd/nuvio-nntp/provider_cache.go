@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -140,10 +141,18 @@ func (l *providerClientLease) validationDuration() time.Duration {
 }
 
 func (l *providerClientLease) awaitReady() error {
+	return l.awaitReadyContext(context.Background())
+}
+
+func (l *providerClientLease) awaitReadyContext(ctx context.Context) error {
 	if l == nil || l.entry == nil {
 		return fmt.Errorf("NNTP provider lease is unavailable")
 	}
-	<-l.entry.ready
+	select {
+	case <-l.entry.ready:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	l.cache.mu.Lock()
 	err := l.entry.err
 	l.cache.mu.Unlock()

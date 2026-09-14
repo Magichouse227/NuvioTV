@@ -3,9 +3,53 @@ package com.nuvio.tv.core.usenet
 import com.nuvio.tv.data.local.PlayerSettings
 import com.nuvio.tv.domain.model.Stream
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class NntpFallbackPolicyTest {
+    @Test
+    fun `rate limited selection stops all fallback and remains the original stream`() {
+        val selected = nzb("selected")
+        val candidates = NntpFallbackPolicy.candidates(
+            selected,
+            listOf(selected, nzb("alternative")),
+            maxFallbackAttempts = 5
+        )
+        val attempted = mutableListOf<Stream>()
+        for (candidate in candidates) {
+            attempted += candidate
+            val failure = NntpException(
+                "NZB download rate-limited",
+                rateLimit = NntpRateLimit(retryAfterKnown = false, cooldownDeadlineElapsedMs = 60_000L)
+            )
+            if (!NntpFallbackPolicy.shouldTryNext(failure)) break
+        }
+        assertEquals(1, attempted.size)
+        assertSame(selected, attempted.single())
+    }
+
+    @Test
+    fun `zero retry after still stops automatic fallback`() {
+        val failure = NntpException(
+            "NZB download rate-limited",
+            rateLimit = NntpRateLimit(
+                retryAfterKnown = true,
+                retryAfterDeadlineElapsedMs = 0L,
+                cooldownDeadlineElapsedMs = 0L
+            )
+        )
+        assertFalse(NntpFallbackPolicy.shouldTryNext(failure))
+    }
+
+    @Test
+    fun `article unavailable and generic failures remain eligible for bounded fallback`() {
+        assertTrue(NntpFallbackPolicy.shouldTryNext(NntpException("NNTP 430 article unavailable")))
+        assertTrue(NntpFallbackPolicy.shouldTryNext(NntpException("Failed to parse NZB")))
+        assertFalse(NntpFallbackPolicy.shouldTryNext(kotlinx.coroutines.CancellationException()))
+    }
+
     @Test
     fun `uses selected result then following playable NZB results`() {
         val before = nzb("before")

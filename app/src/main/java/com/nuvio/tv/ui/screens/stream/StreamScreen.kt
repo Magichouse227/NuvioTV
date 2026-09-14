@@ -266,6 +266,7 @@ fun StreamScreen(
     }
 
     BackHandler {
+        viewModel.cancelNntpStartup()
         onBackPress()
     }
 
@@ -433,8 +434,23 @@ fun StreamScreen(
                         .fillMaxHeight()
                 )
 
-                // Right side - Streams container
-                RightStreamSection(
+                // Keep the original selection available for an explicit retry after 429.
+                Column(Modifier.weight(0.6f).fillMaxHeight()) {
+                    val rateLimit = uiState.nntpRateLimit
+                    val selectedNntpStream = uiState.selectedNntpStream
+                    if (rateLimit != null && selectedNntpStream != null) {
+                        NntpCooldownNotice(rateLimit = rateLimit, onRetry = {
+                            scope.coroutineLaunch {
+                                val playbackInfo = viewModel.resolveStreamForPlayback(selectedNntpStream)
+                                if (playbackInfo != null) {
+                                    pendingRestoreOnResume = true
+                                    routePlayback(playbackInfo)
+                                    viewModel.onEvent(StreamScreenEvent.OnAutoPlayConsumed)
+                                }
+                            }
+                        })
+                    }
+                    RightStreamSection(
                     isLoading = uiState.isLoading,
                     error = uiState.error,
                     streams = uiState.filteredStreams,
@@ -452,6 +468,9 @@ fun StreamScreen(
                             it.url == stream.url &&
                                 it.infoHash == stream.infoHash &&
                                 it.ytId == stream.ytId &&
+                                it.nzbUrl == stream.nzbUrl &&
+                                it.fileIdx == stream.fileIdx &&
+                                it.fileMustInclude == stream.fileMustInclude &&
                                 it.addonName == stream.addonName
                         }
                         if (currentIndex >= 0) {
@@ -477,9 +496,10 @@ fun StreamScreen(
                     onRetry = { viewModel.onEvent(StreamScreenEvent.OnRetry) },
                     hazeState = streamHazeState,
                     modifier = Modifier
-                        .weight(0.6f)
-                        .fillMaxHeight()
+                        .weight(1f)
+                        .fillMaxWidth()
                 )
+                }
             }
         }
 

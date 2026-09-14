@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -39,6 +40,14 @@ type sessionStats struct {
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+type rateLimitErrorResponse struct {
+	Error             string `json:"error"`
+	Code              string `json:"code"`
+	HTTPStatus        int    `json:"httpStatus"`
+	RetryAfterSeconds *int64 `json:"retryAfterSeconds"`
+	CooldownSeconds   int64  `json:"cooldownSeconds"`
 }
 
 func newAPIServer(registry *sessionRegistry, baseURL, token string) *apiServer {
@@ -100,9 +109,28 @@ func (s *apiServer) handleSessions(w http.ResponseWriter, request *http.Request)
 		return
 	}
 
-	session, err := s.registry.create(payload)
+	session, err := s.registry.createContext(request.Context(), payload)
 	if err != nil {
 		logger.Warn("Failed to create NNTP session", "err", err)
+		var rateLimitErr *nzbRateLimitError
+		if errors.As(err, &rateLimitErr) {
+			writeJSON(w, http.StatusTooManyRequests, rateLimitErrorResponse{
+				Error:             rateLimitErr.Error(),
+				Code:              "nzb_rate_limited",
+				HTTPStatus:        http.StatusTooManyRequests,
+				RetryAfterSeconds: rateLimitErr.retryAfter(),
+				CooldownSeconds:   rateLimitErr.cooldownSeconds,
+			})
+			return
+		}
+		if errors.Is(err, errInvalidSessionID) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, errSessionIDConflict) || errors.Is(err, errSessionCreationCanceled) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -134,6 +162,10 @@ func (s *apiServer) handleSession(w http.ResponseWriter, request *http.Request) 
 			}
 			writeJSON(w, http.StatusOK, session.stats())
 		case http.MethodDelete:
+			if !validSessionID(id) {
+				writeError(w, http.StatusBadRequest, "invalid session ID")
+				return
+			}
 			if !s.registry.delete(id) {
 				http.NotFound(w, request)
 				return

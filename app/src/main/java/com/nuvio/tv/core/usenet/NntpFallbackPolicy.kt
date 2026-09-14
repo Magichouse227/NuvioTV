@@ -4,6 +4,13 @@ import com.nuvio.tv.data.local.PlayerSettings
 import com.nuvio.tv.domain.model.Stream
 
 internal object NntpFallbackPolicy {
+    // A rate limit is about downloading the NZB, not the availability of NNTP articles.
+    // Stop the whole automatic chain, including a zero/past Retry-After. Only a manual
+    // selection may try again once the endpoint's cooldown allows it.
+    fun shouldTryNext(error: Exception): Boolean =
+        error !is kotlinx.coroutines.CancellationException &&
+            (error as? NntpException)?.rateLimit == null
+
     fun candidates(
         selected: Stream,
         orderedStreams: List<Stream>,

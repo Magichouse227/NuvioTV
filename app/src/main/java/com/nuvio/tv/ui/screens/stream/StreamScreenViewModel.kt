@@ -26,7 +26,9 @@ import com.nuvio.tv.core.tracking.buildTrackingMediaReference
 import com.nuvio.tv.core.util.parseRuntimeMinutes
 import com.nuvio.tv.core.streams.StreamBadgePresentation
 import com.nuvio.tv.core.usenet.NntpFallbackPolicy
+import com.nuvio.tv.core.usenet.NntpException
 import com.nuvio.tv.core.usenet.NntpService
+import com.nuvio.tv.core.usenet.NntpStartupGate
 import com.nuvio.tv.data.local.PlayerPreference
 import com.nuvio.tv.data.local.PlayerSettings
 import com.nuvio.tv.data.local.PlayerSettingsDataStore
@@ -54,6 +56,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.ensureActive
@@ -103,6 +106,8 @@ class StreamScreenViewModel @Inject constructor(
     private var isTorrentStreamStarted = false
     private var isNntpStreamStarted = false
     private var nntpPrewarmRequested = false
+    private val nntpStartupGate = NntpStartupGate()
+    private var nntpStartupJob: Job? = null
     private var streamLoadJob: Job? = null
     private var streamLoadScope: kotlinx.coroutines.CoroutineScope? = null
     private var streamLoadCompleted = false
@@ -1149,8 +1154,27 @@ class StreamScreenViewModel @Inject constructor(
 
     suspend fun resolveStreamForPlayback(stream: Stream): StreamPlaybackInfo? {
         if (stream.isNzb()) {
-            return resolveNntpStreamForPlayback(stream)
+            return nntpStartupGate.run {
+                val resolutionJob = currentCoroutineContext()[Job]
+                nntpStartupJob = resolutionJob
+                try {
+                    resolveNntpStreamForPlayback(stream)
+                } catch (error: CancellationException) {
+                    if (nntpStartupJob === resolutionJob) {
+                        nntpService.stopStream()
+                        isNntpStreamStarted = false
+                        updateUiStateIfChanged {
+                            it.copy(showDirectAutoPlayOverlay = false, directAutoPlayMessage = null)
+                        }
+                    }
+                    throw error
+                } finally {
+                    if (nntpStartupJob === resolutionJob) nntpStartupJob = null
+                }
+            }
         }
+        cancelNntpStartup()
+        updateUiStateIfChanged { it.copy(nntpRateLimit = null, selectedNntpStream = null) }
         if (!directDebridResolver.shouldResolveToPlayableStream(stream)) {
             Log.d(TAG, "resolveStreamForPlayback: no debrid resolve needed, using direct URL")
             return getStreamForPlayback(stream)
@@ -1240,6 +1264,10 @@ class StreamScreenViewModel @Inject constructor(
     }
 
     private suspend fun resolveNntpStreamForPlayback(stream: Stream): StreamPlaybackInfo? {
+        // Save the original selection, not whichever fallback candidate later returns 429.
+        updateUiStateIfChanged {
+            it.copy(nntpRateLimit = null, selectedNntpStream = stream)
+        }
         val playerSettings = playerSettingsDataStore.playerSettings.first()
         val showLoadingStatus = playerSettings.showPlayerLoadingStatus
         updateUiStateIfChanged {
@@ -1294,11 +1322,14 @@ class StreamScreenViewModel @Inject constructor(
                     season = season,
                     episode = episode
                 )
+                currentCoroutineContext().ensureActive()
                 isNntpStreamStarted = true
                 updateUiStateIfChanged {
                     it.copy(
                         showDirectAutoPlayOverlay = false,
-                        directAutoPlayMessage = null
+                        directAutoPlayMessage = null,
+                        nntpRateLimit = null,
+                        selectedNntpStream = null
                     )
                 }
                 val playbackInfo = getStreamForPlayback(candidate)
@@ -1311,6 +1342,24 @@ class StreamScreenViewModel @Inject constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                currentCoroutineContext().ensureActive()
+                if (!NntpFallbackPolicy.shouldTryNext(error)) {
+                    val rateLimit = (error as? NntpException)?.rateLimit
+                    autoPlayHandledForSession = true
+                    directAutoPlayFlowEnabledForSession = false
+                    updateUiStateIfChanged {
+                        it.copy(
+                            isDirectAutoPlayFlow = false,
+                            autoPlayDecided = true,
+                            showDirectAutoPlayOverlay = false,
+                            directAutoPlayMessage = null,
+                            playbackErrorMessage = null,
+                            nntpRateLimit = rateLimit,
+                            selectedNntpStream = stream
+                        )
+                    }
+                    return null
+                }
                 lastError = error
                 Log.w(
                     TAG,
@@ -1332,6 +1381,17 @@ class StreamScreenViewModel @Inject constructor(
             )
         }
         return null
+    }
+
+    fun cancelNntpStartup() {
+        val job = nntpStartupJob ?: return
+        nntpStartupJob = null
+        job.cancel()
+        nntpService.stopStream()
+        isNntpStreamStarted = false
+        updateUiStateIfChanged {
+            it.copy(showDirectAutoPlayOverlay = false, directAutoPlayMessage = null)
+        }
     }
 
     fun onPlaybackErrorShown() {
@@ -1508,6 +1568,7 @@ class StreamScreenViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        cancelNntpStartup()
         if (isTorrentStreamStarted) {
             torrentService.stopStream()
             isTorrentStreamStarted = false

@@ -17,39 +17,70 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Keeps a session ID observable across the cancellation boundary around a blocking create call.
- * The create implementation must invoke [onCreated] from its non-cancellable IO section.
+ * Keeps a session ID observable across the cancellation boundary around an in-flight create call.
+ * The create implementation must invoke [onCreated] once it has a protocol identity, before
+ * enqueueing a cancellable request. [cleanup] must only enqueue cleanup work; it is intentionally
+ * never awaited from a cancelled OkHttp callback.
  */
 internal suspend fun <T> createNntpSessionSafely(
     create: suspend (onCreated: (String) -> Unit) -> T,
     publish: suspend (T) -> Unit,
-    cleanup: suspend (String) -> Unit
+    cleanup: (String) -> Unit
 ): T {
-    val createdSessionId = AtomicReference<String?>()
+    val ownershipLock = Any()
+    val createdSessionIds = LinkedHashSet<String>()
+    val cleanedSessionIds = HashSet<String>()
+    var abandoned = false
+    var completed = false
+
+    fun dispatchCleanup(sessionId: String) {
+        val shouldCleanup = synchronized(ownershipLock) {
+            cleanedSessionIds.add(sessionId)
+        }
+        if (!shouldCleanup) return
+        cleanup(sessionId)
+    }
+
+    val onCreated: (String) -> Unit = { sessionId ->
+        val cleanupNow = synchronized(ownershipLock) {
+            if (abandoned || completed) {
+                true
+            } else {
+                createdSessionIds += sessionId
+                false
+            }
+        }
+        if (cleanupNow) dispatchCleanup(sessionId)
+    }
+
+    fun cleanupAbandonedSessions() {
+        val sessionIds = synchronized(ownershipLock) {
+            abandoned = true
+            createdSessionIds.toList().also {
+                createdSessionIds.clear()
+            }
+        }
+        sessionIds.forEach(::dispatchCleanup)
+    }
+
     try {
-        val result = create { id -> createdSessionId.set(id) }
+        val result = create(onCreated)
         currentCoroutineContext().ensureActive()
         publish(result)
-        createdSessionId.set(null)
+        synchronized(ownershipLock) {
+            completed = true
+            createdSessionIds.clear()
+        }
         return result
     } catch (error: CancellationException) {
-        createdSessionId.getAndSet(null)?.let { id ->
-            withContext(kotlinx.coroutines.NonCancellable) {
-                runCatching { cleanup(id) }
-            }
-        }
+        cleanupAbandonedSessions()
         throw error
     } catch (error: Exception) {
-        createdSessionId.getAndSet(null)?.let { id ->
-            withContext(kotlinx.coroutines.NonCancellable) {
-                runCatching { cleanup(id) }
-            }
-        }
+        cleanupAbandonedSessions()
         throw error
     }
 }
@@ -72,8 +103,12 @@ class NntpService @Inject constructor(
     @Volatile
     private var currentSessionId: String? = null
     @Volatile
+    private var currentStreamUrl: String? = null
+    private var currentStartRequest: StartParameters? = null
+    @Volatile
     private var generation = 0L
     private var activeStartJob: Job? = null
+    private var activeStartRequest: StartParameters? = null
     private var statsJob: Job? = null
     private var prewarmShutdownJob: Job? = null
     private var cleanupJob: Job? = null
@@ -117,11 +152,26 @@ class NntpService @Inject constructor(
     ): String = withContext(Dispatchers.IO) {
         val callerJob = currentCoroutineContext()[Job]
             ?: error("NNTP stream start requires a coroutine job")
-        val start = beginStart(callerJob)
+        val parameters = StartParameters(
+            nzbUrl = nzbUrl,
+            servers = servers.toList(),
+            fileIdx = fileIdx,
+            fileMustInclude = fileMustInclude,
+            season = season,
+            episode = episode
+        )
+        val start = beginStart(callerJob, parameters)
+        start.existingStreamUrl?.let { return@withContext it }
+        if (start.duplicate) {
+            // A duplicate tap must not cancel and recreate the request that is already doing the
+            // work. The UI normally prevents this with its own mutex; this safe error keeps the
+            // first request authoritative if two callers still race.
+            throw NntpException("NNTP stream start is already in progress")
+        }
         val startupStartedAt = SystemClock.elapsedRealtime()
         try {
-            // A previous start can still be finishing a non-cancellable create request. Wait for
-            // that coroutine and its session release before starting another request.
+            // A previous start can still be finishing its cancellation and session release. Wait
+            // for that coroutine before starting another request.
             start.previousStart?.let { previous ->
                 if (previous !== callerJob) previous.join()
             }
@@ -143,21 +193,20 @@ class NntpService @Inject constructor(
                 create = { onCreated ->
                     api.createSession(
                         NntpSessionRequest(
-                            nzbUrl = nzbUrl,
-                            servers = servers,
-                            fileIdx = fileIdx,
-                            fileMustInclude = fileMustInclude,
-                            season = season,
-                            episode = episode
+                            nzbUrl = parameters.nzbUrl,
+                            servers = parameters.servers,
+                            fileIdx = parameters.fileIdx,
+                            fileMustInclude = parameters.fileMustInclude,
+                            season = parameters.season,
+                            episode = parameters.episode
                         ),
                         onSessionCreated = onCreated
                     )
                 },
                 publish = { created ->
-                    // createSession deliberately completes its bounded IO call in NonCancellable.
                     // The cancellation/generation check must happen before this result is visible.
                     ensureCurrentGeneration(start.generation)
-                    publishSession(start.generation, created)
+                    publishSession(start.generation, parameters, created)
                 },
                 cleanup = { id -> cleanupLateSession(id) }
             )
@@ -173,14 +222,31 @@ class NntpService @Inject constructor(
             publishIdleIfCurrent(start.generation)
             throw error
         } catch (error: Exception) {
-            DiagnosticLog.recordThrowable("nntp_failure", error)
+            if (error is NntpException && error.rateLimit != null) {
+                val limit = error.rateLimit
+                val nowElapsedMs = SystemClock.elapsedRealtime()
+                DiagnosticLog.record(
+                    "nntp",
+                    "event=rate_limited status=${limit.httpStatus} " +
+                        "retry_known=${if (limit.retryAfterKnown) 1 else 0} " +
+                        "retry_after_s=${limit.retryAfterRemainingSeconds(nowElapsedMs) ?: -1} " +
+                        "cooldown_s=${limit.cooldownRemainingSeconds(nowElapsedMs)}"
+                )
+            } else {
+                DiagnosticLog.recordThrowable("nntp_failure", error)
+            }
             val message = error.message ?: "Failed to start NNTP stream"
-            publishErrorIfCurrent(start.generation, message)
+            publishErrorIfCurrent(
+                expectedGeneration = start.generation,
+                message = message,
+                rateLimit = (error as? NntpException)?.rateLimit
+            )
             throw if (error is NntpException) error else NntpException(message)
         } finally {
             synchronized(lifecycleLock) {
                 if (activeStartJob === callerJob) {
                     activeStartJob = null
+                    activeStartRequest = null
                 }
             }
         }
@@ -193,6 +259,9 @@ class NntpService @Inject constructor(
             statsJob = null
             val sessionId = currentSessionId
             currentSessionId = null
+            currentStreamUrl = null
+            currentStartRequest = null
+            activeStartRequest = null
             scheduleSessionCleanupLocked(sessionId)
             _state.value = NntpState.Idle
             // Keep this reference until the cancelled start runs its late-session cleanup. A
@@ -209,6 +278,9 @@ class NntpService @Inject constructor(
             statsJob?.cancel()
             statsJob = null
             currentSessionId = null
+            currentStreamUrl = null
+            currentStartRequest = null
+            activeStartRequest = null
             _state.value = NntpState.Idle
             activeStartJob
         }
@@ -245,23 +317,61 @@ class NntpService @Inject constructor(
         val generation: Long,
         val previousStart: Job?,
         val previousCleanup: Job?,
-        val prewarmStop: Job?
+        val prewarmStop: Job?,
+        val duplicate: Boolean = false,
+        val existingStreamUrl: String? = null
+    )
+
+    private data class StartParameters(
+        val nzbUrl: String,
+        val servers: List<String>,
+        val fileIdx: Int?,
+        val fileMustInclude: String?,
+        val season: Int?,
+        val episode: Int?
     )
 
     /**
      * Invalidate the old generation before a new request can produce a session ID. The old start
      * remains represented by [previousStart] so a replacement cannot race its late cleanup.
      */
-    private fun beginStart(callerJob: Job): StartReservation = synchronized(lifecycleLock) {
+    private fun beginStart(
+        callerJob: Job,
+        parameters: StartParameters
+    ): StartReservation = synchronized(lifecycleLock) {
+        if (currentSessionId != null && currentStartRequest == parameters) {
+            return StartReservation(
+                generation = generation,
+                previousStart = null,
+                previousCleanup = null,
+                prewarmStop = null,
+                existingStreamUrl = currentStreamUrl
+            )
+        }
+        if (activeStartJob != null &&
+            activeStartJob !== callerJob &&
+            activeStartRequest == parameters
+        ) {
+            return StartReservation(
+                generation = generation,
+                previousStart = null,
+                previousCleanup = null,
+                prewarmStop = null,
+                duplicate = true
+            )
+        }
         val previousStart = activeStartJob?.takeIf { it !== callerJob }
         generation++
         val nextGeneration = generation
         activeStartJob = callerJob
+        activeStartRequest = parameters
 
         statsJob?.cancel()
         statsJob = null
         val sessionId = currentSessionId
         currentSessionId = null
+        currentStreamUrl = null
+        currentStartRequest = null
         scheduleSessionCleanupLocked(sessionId)
         val previousCleanup = cleanupJob
 
@@ -273,7 +383,10 @@ class NntpService @Inject constructor(
         StartReservation(nextGeneration, previousStart, previousCleanup, prewarmStop)
     }
 
-    private fun scheduleSessionCleanupLocked(sessionId: String?) {
+    private fun scheduleSessionCleanupLocked(
+        sessionId: String?,
+        late: Boolean = false
+    ) {
         if (sessionId == null) return
         val previousCleanup = cleanupJob
         cleanupJob = scope.launch {
@@ -281,19 +394,20 @@ class NntpService @Inject constructor(
             withContext(kotlinx.coroutines.NonCancellable) {
                 api.deleteSession(sessionId)
             }
-            DiagnosticLog.record("nntp", "event=session_released")
+            DiagnosticLog.record(
+                "nntp",
+                if (late) "event=session_released_late" else "event=session_released"
+            )
         }
     }
 
-    private suspend fun cleanupLateSession(sessionId: String?) {
+    private fun cleanupLateSession(sessionId: String?) {
         if (sessionId == null) return
-        withContext(kotlinx.coroutines.NonCancellable) {
-            try {
-                api.deleteSession(sessionId)
-                DiagnosticLog.record("nntp", "event=session_released_late")
-            } catch (error: Exception) {
-                Log.w(TAG, "Failed to release late NNTP session", error)
-            }
+        synchronized(lifecycleLock) {
+            // createNntpSessionSafely calls this from either the cancelled caller or an OkHttp
+            // callback. Queue it on the same serialized cleanup chain used by stopStream; never
+            // make either of those callers await a potentially slow DELETE.
+            scheduleSessionCleanupLocked(sessionId, late = true)
         }
     }
 
@@ -316,12 +430,18 @@ class NntpService @Inject constructor(
         }
     }
 
-    private fun publishSession(expectedGeneration: Long, session: NntpSession) {
+    private fun publishSession(
+        expectedGeneration: Long,
+        parameters: StartParameters,
+        session: NntpSession
+    ) {
         synchronized(lifecycleLock) {
             if (!isGenerationCurrent(expectedGeneration)) {
                 throw CancellationException("NNTP stream start was superseded")
             }
             currentSessionId = session.id
+            currentStreamUrl = session.streamUrl
+            currentStartRequest = parameters
             _state.value = NntpState.Streaming(localUrl = session.streamUrl)
             startStatsPollingLocked(expectedGeneration, session)
         }
@@ -335,10 +455,14 @@ class NntpService @Inject constructor(
         }
     }
 
-    private fun publishErrorIfCurrent(expectedGeneration: Long, message: String) {
+    private fun publishErrorIfCurrent(
+        expectedGeneration: Long,
+        message: String,
+        rateLimit: NntpRateLimit?
+    ) {
         synchronized(lifecycleLock) {
             if (isGenerationCurrent(expectedGeneration)) {
-                _state.value = NntpState.Error(message)
+                _state.value = NntpState.Error(message = message, rateLimit = rateLimit)
             }
         }
     }

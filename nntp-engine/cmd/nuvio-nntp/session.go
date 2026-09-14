@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -29,11 +29,16 @@ const (
 	totalSegmentCacheMB       = 64
 	providerValidationTimeout = 15 * time.Second
 	mediaPreparationTimeout   = 75 * time.Second
+	sessionTombstoneTTL       = time.Minute
 )
+
+var defaultNZBRateLimiter = newNZBRateLimiter(time.Now)
+var defaultNZBDownloadCoordinator = newNZBDownloadCoordinator(defaultNZBRateLimiter)
 
 type createSessionRequest struct {
 	NZBURL          string   `json:"nzbUrl"`
 	Servers         []string `json:"servers"`
+	SessionID       string   `json:"sessionId,omitempty"`
 	FileIndex       *int     `json:"fileIdx,omitempty"`
 	FileMustInclude string   `json:"fileMustInclude,omitempty"`
 	Season          int      `json:"season,omitempty"`
@@ -55,37 +60,65 @@ type engineSession struct {
 	document  *nzb.NZB
 	target    unpack.EpisodeTarget
 
-	openMu    sync.Mutex
-	blueprint unpack.Blueprint
-	closeOnce sync.Once
+	openMu            sync.Mutex
+	blueprint         unpack.Blueprint
+	closeOnce         sync.Once
 	diagnosticCreated atomic.Bool
 }
 
 func newEngineSession(request createSessionRequest, httpClient *http.Client, providerCache *providerClientCache, cacheBudget *usenetpool.SegmentCacheBudget) (*engineSession, error) {
+	return newEngineSessionContext(context.Background(), request, httpClient, providerCache, cacheBudget)
+}
+
+func newEngineSessionContext(
+	startupCtx context.Context,
+	request createSessionRequest,
+	httpClient *http.Client,
+	providerCache *providerClientCache,
+	cacheBudget *usenetpool.SegmentCacheBudget,
+) (*engineSession, error) {
+	return newEngineSessionContextWithCoordinator(
+		startupCtx,
+		request,
+		httpClient,
+		providerCache,
+		cacheBudget,
+		defaultNZBDownloadCoordinator,
+	)
+}
+
+func newEngineSessionContextWithCoordinator(
+	startupCtx context.Context,
+	request createSessionRequest,
+	httpClient *http.Client,
+	providerCache *providerClientCache,
+	cacheBudget *usenetpool.SegmentCacheBudget,
+	coordinator *nzbDownloadCoordinator,
+) (*engineSession, error) {
+	if coordinator == nil {
+		coordinator = defaultNZBDownloadCoordinator
+	}
 	startupStarted := time.Now()
+	if err := startupCtx.Err(); err != nil {
+		return nil, err
+	}
+	id := request.SessionID
+	if id == "" {
+		var err error
+		id, err = newSessionID()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create session")
+		}
+	} else if !validSessionID(id) {
+		return nil, errInvalidSessionID
+	}
 	providers, err := parseProviders(request.Servers)
 	if err != nil {
 		return nil, err
 	}
-	id, err := newSessionID()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create session")
-	}
-
-	providerStarted := time.Now()
-	providerLease, err := providerCache.acquire(providers)
-	if err != nil {
-		return nil, err
-	}
-	leaseOwned := true
-	defer func() {
-		if leaseOwned {
-			providerLease.release()
-		}
-	}()
 
 	loadStarted := time.Now()
-	document, loadMetrics, err := downloadAndParseNZB(request.NZBURL, httpClient)
+	document, loadMetrics, err := downloadAndParseNZBContext(startupCtx, request.NZBURL, httpClient, coordinator)
 	if err != nil {
 		return nil, err
 	}
@@ -116,8 +149,20 @@ func newEngineSession(request createSessionRequest, httpClient *http.Client, pro
 		return nil, fmt.Errorf("NZB contains no playable content")
 	}
 
+	providerStarted := time.Now()
+	providerLease, err := providerCache.acquire(providers)
+	if err != nil {
+		return nil, err
+	}
+	leaseOwned := true
+	defer func() {
+		if leaseOwned {
+			providerLease.release()
+		}
+	}()
+
 	providerWaitStarted := time.Now()
-	if err := providerLease.awaitReady(); err != nil {
+	if err := providerLease.awaitReadyContext(startupCtx); err != nil {
 		return nil, err
 	}
 	logger.Info(
@@ -141,6 +186,9 @@ func newEngineSession(request createSessionRequest, httpClient *http.Client, pro
 		return nil, fmt.Errorf("failed to initialize NNTP providers")
 	}
 
+	if err := startupCtx.Err(); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	target := unpack.EpisodeTarget{
 		Season:          request.Season,
@@ -176,7 +224,7 @@ func newEngineSession(request createSessionRequest, httpClient *http.Client, pro
 	}
 	session.touch()
 
-	prepareCtx, prepareCancel := context.WithTimeout(ctx, mediaPreparationTimeout)
+	prepareCtx, prepareCancel := context.WithTimeout(startupCtx, mediaPreparationTimeout)
 	type mediaPreparationResult struct {
 		err      error
 		duration time.Duration
@@ -192,7 +240,7 @@ func newEngineSession(request createSessionRequest, httpClient *http.Client, pro
 	}()
 
 	preflightStarted := time.Now()
-	exists, statErr := verifyRequiredArchivesExist(ctx, files)
+	exists, statErr := verifyRequiredArchivesExist(startupCtx, files)
 	logStartupPhase(id, "preflight", preflightStarted)
 	switch {
 	case errors.Is(statErr, errFirstSegmentUnavailable):
@@ -217,6 +265,10 @@ func newEngineSession(request createSessionRequest, httpClient *http.Client, pro
 	if prepareResult.err != nil {
 		session.close()
 		return nil, fmt.Errorf("failed to prepare NZB media: %w", prepareResult.err)
+	}
+	if err := startupCtx.Err(); err != nil {
+		session.close()
+		return nil, err
 	}
 	leaseOwned = false
 	session.diagnosticCreated.Store(true)
@@ -360,39 +412,30 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 }
 
 func downloadAndParseNZB(rawURL string, client *http.Client) (*nzb.NZB, nzbLoadMetrics, error) {
+	return downloadAndParseNZBContext(context.Background(), rawURL, client, defaultNZBDownloadCoordinator)
+}
+
+func downloadAndParseNZBContext(
+	parent context.Context,
+	rawURL string,
+	client *http.Client,
+	coordinator *nzbDownloadCoordinator,
+) (*nzb.NZB, nzbLoadMetrics, error) {
 	var metrics nzbLoadMetrics
 	trimmed := strings.TrimSpace(rawURL)
-	parsed, err := url.Parse(trimmed)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
-		return nil, metrics, fmt.Errorf("invalid NZB URL")
+	if _, err := nzbEndpointKey(trimmed); err != nil {
+		return nil, metrics, err
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
+	fetched, err := coordinator.download(ctx, trimmed, client)
+	metrics.headers = fetched.headerDuration
 	if err != nil {
-		return nil, metrics, fmt.Errorf("invalid NZB URL")
-	}
-	requestStarted := time.Now()
-	response, err := client.Do(request)
-	metrics.headers = time.Since(requestStarted)
-	if err != nil {
-		return nil, metrics, fmt.Errorf("failed to download NZB")
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, metrics, fmt.Errorf("failed to download NZB (HTTP %d)", response.StatusCode)
-	}
-	if response.ContentLength == 0 {
-		return nil, metrics, fmt.Errorf("downloaded NZB is empty")
-	}
-	if response.ContentLength > maxNZBSize {
-		return nil, metrics, fmt.Errorf("downloaded NZB exceeds the 64 MiB limit")
+		return nil, metrics, err
 	}
 
 	bodyStarted := time.Now()
-	limited := &io.LimitedReader{R: response.Body, N: maxNZBSize + 1}
-	counted := &countingReader{reader: limited}
+	counted := &countingReader{reader: bytes.NewReader(fetched.body)}
 	document, parseErr := nzb.ParseWithContext(ctx, counted)
 	if parseErr == nil {
 		_, parseErr = io.Copy(io.Discard, counted)
@@ -406,6 +449,9 @@ func downloadAndParseNZB(rawURL string, client *http.Client) (*nzb.NZB, nzbLoadM
 		return nil, metrics, fmt.Errorf("downloaded NZB exceeds the 64 MiB limit")
 	}
 	if parseErr != nil {
+		if ctx.Err() != nil {
+			return nil, metrics, ctx.Err()
+		}
 		return nil, metrics, fmt.Errorf("failed to parse NZB")
 	}
 	return document, metrics, nil
@@ -419,16 +465,45 @@ func newSessionID() (string, error) {
 	return hex.EncodeToString(buffer), nil
 }
 
+var (
+	errInvalidSessionID        = errors.New("invalid session ID")
+	errSessionIDConflict       = errors.New("session ID is already in use")
+	errSessionCreationCanceled = errors.New("session creation canceled")
+)
+
+func validSessionID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, character := range id {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+type sessionCreation struct {
+	generation uint64
+	cancel     context.CancelFunc
+}
+
 type sessionRegistry struct {
-	mu          sync.RWMutex
-	sessions    map[string]*engineSession
-	maxSessions int
-	ttl         time.Duration
-	httpClient  *http.Client
-	providers   *providerClientCache
-	cacheBudget *usenetpool.SegmentCacheBudget
-	stopCh      chan struct{}
-	stopOnce    sync.Once
+	mu           sync.RWMutex
+	sessions     map[string]*engineSession
+	creating     map[string]sessionCreation
+	tombstones   map[string]time.Time
+	generation   uint64
+	maxSessions  int
+	ttl          time.Duration
+	now          func() time.Time
+	httpClient   *http.Client
+	providers    *providerClientCache
+	cacheBudget  *usenetpool.SegmentCacheBudget
+	nzbDownloads *nzbDownloadCoordinator
+	newSession   func(context.Context, createSessionRequest) (*engineSession, error)
+	stopCh       chan struct{}
+	stopOnce     sync.Once
 }
 
 func newSessionRegistry(maxSessions int, ttl time.Duration) *sessionRegistry {
@@ -445,32 +520,132 @@ func newSessionRegistry(maxSessions int, ttl time.Duration) *sessionRegistry {
 		},
 	}
 	registry := &sessionRegistry{
-		sessions:    make(map[string]*engineSession),
-		maxSessions: maxSessions,
-		ttl:         ttl,
-		httpClient:  client,
-		providers:   newProviderClientCache(),
-		cacheBudget: usenetpool.NewSegmentCacheBudget(totalSegmentCacheMB),
-		stopCh:      make(chan struct{}),
+		sessions:     make(map[string]*engineSession),
+		creating:     make(map[string]sessionCreation),
+		tombstones:   make(map[string]time.Time),
+		maxSessions:  maxSessions,
+		ttl:          ttl,
+		now:          time.Now,
+		httpClient:   client,
+		providers:    newProviderClientCache(),
+		cacheBudget:  usenetpool.NewSegmentCacheBudget(totalSegmentCacheMB),
+		nzbDownloads: defaultNZBDownloadCoordinator,
+		stopCh:       make(chan struct{}),
+	}
+	registry.newSession = func(startupCtx context.Context, request createSessionRequest) (*engineSession, error) {
+		return newEngineSessionContextWithCoordinator(
+			startupCtx,
+			request,
+			registry.httpClient,
+			registry.providers,
+			registry.cacheBudget,
+			registry.nzbDownloads,
+		)
 	}
 	go registry.cleanupLoop()
 	return registry
 }
 
 func (r *sessionRegistry) create(request createSessionRequest) (*engineSession, error) {
-	session, err := newEngineSession(request, r.httpClient, r.providers, r.cacheBudget)
-	if err != nil {
-		return nil, err
+	return r.createContext(context.Background(), request)
+}
+
+func (r *sessionRegistry) createContext(ctx context.Context, request createSessionRequest) (*engineSession, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id := request.SessionID
+	if id == "" {
+		var err error
+		id, err = newSessionID()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create session")
+		}
+		request.SessionID = id
+	} else if !validSessionID(id) {
+		return nil, errInvalidSessionID
 	}
 
+	startupCtx, startupCancel := context.WithCancel(ctx)
 	r.mu.Lock()
-	r.sessions[session.id] = session
-	evicted := r.evictLocked(session.id)
+	r.pruneTombstonesLocked(r.now())
+	if _, exists := r.sessions[id]; exists {
+		r.mu.Unlock()
+		startupCancel()
+		return nil, errSessionIDConflict
+	}
+	if _, exists := r.creating[id]; exists {
+		r.mu.Unlock()
+		startupCancel()
+		return nil, errSessionIDConflict
+	}
+	if _, canceled := r.tombstones[id]; canceled {
+		r.mu.Unlock()
+		startupCancel()
+		return nil, errSessionCreationCanceled
+	}
+	r.generation++
+	generation := r.generation
+	r.creating[id] = sessionCreation{
+		generation: generation,
+		cancel:     startupCancel,
+	}
 	r.mu.Unlock()
+
+	buildSession := r.newSession
+	if buildSession == nil {
+		buildSession = func(startupCtx context.Context, request createSessionRequest) (*engineSession, error) {
+			return newEngineSessionContextWithCoordinator(
+				startupCtx,
+				request,
+				r.httpClient,
+				r.providers,
+				r.cacheBudget,
+				r.nzbDownloads,
+			)
+		}
+	}
+	session, err := buildSession(startupCtx, request)
+	if err != nil {
+		r.finishCreate(id, generation)
+		startupCancel()
+		return nil, err
+	}
+	session.id = id
+
+	r.mu.Lock()
+	reservation, reserved := r.creating[id]
+	allowed := reserved &&
+		reservation.generation == generation &&
+		startupCtx.Err() == nil &&
+		!r.tombstoneActiveLocked(id, r.now()) &&
+		r.sessions[id] == nil
+	if reserved && reservation.generation == generation {
+		delete(r.creating, id)
+	}
+	var evicted []*engineSession
+	if allowed {
+		r.sessions[id] = session
+		evicted = r.evictLocked(id)
+	}
+	r.mu.Unlock()
+	startupCancel()
+	if !allowed {
+		session.close()
+		return nil, errSessionCreationCanceled
+	}
 	for _, old := range evicted {
 		old.close()
 	}
 	return session, nil
+}
+
+func (r *sessionRegistry) finishCreate(id string, generation uint64) {
+	r.mu.Lock()
+	if reservation, ok := r.creating[id]; ok && reservation.generation == generation {
+		delete(r.creating, id)
+	}
+	r.mu.Unlock()
 }
 
 func (r *sessionRegistry) get(id string, touch bool) (*engineSession, bool) {
@@ -484,16 +659,49 @@ func (r *sessionRegistry) get(id string, touch bool) (*engineSession, bool) {
 }
 
 func (r *sessionRegistry) delete(id string) bool {
+	if !validSessionID(id) {
+		return false
+	}
+	var pendingCancel context.CancelFunc
 	r.mu.Lock()
-	session, ok := r.sessions[id]
-	if ok {
+	r.pruneTombstonesLocked(r.now())
+	session, hasSession := r.sessions[id]
+	if hasSession {
 		delete(r.sessions, id)
 	}
+	if pending, pendingOK := r.creating[id]; pendingOK {
+		delete(r.creating, id)
+		pendingCancel = pending.cancel
+	}
+	r.tombstones[id] = r.now().Add(sessionTombstoneTTL)
 	r.mu.Unlock()
-	if ok {
+	if pendingCancel != nil {
+		pendingCancel()
+	}
+	if session != nil {
 		session.close()
 	}
-	return ok
+	return true
+}
+
+func (r *sessionRegistry) pruneTombstonesLocked(now time.Time) {
+	for id, expires := range r.tombstones {
+		if !expires.After(now) {
+			delete(r.tombstones, id)
+		}
+	}
+}
+
+func (r *sessionRegistry) tombstoneActiveLocked(id string, now time.Time) bool {
+	expires, ok := r.tombstones[id]
+	if !ok {
+		return false
+	}
+	if !expires.After(now) {
+		delete(r.tombstones, id)
+		return false
+	}
+	return true
 }
 
 func (r *sessionRegistry) evictLocked(keepID string) []*engineSession {
@@ -547,7 +755,15 @@ func (r *sessionRegistry) closeAll() {
 		delete(r.sessions, id)
 		sessions = append(sessions, session)
 	}
+	pending := make([]context.CancelFunc, 0, len(r.creating))
+	for id, reservation := range r.creating {
+		delete(r.creating, id)
+		pending = append(pending, reservation.cancel)
+	}
 	r.mu.Unlock()
+	for _, cancel := range pending {
+		cancel()
+	}
 	for _, session := range sessions {
 		session.close()
 	}
@@ -575,16 +791,16 @@ func (r *sessionRegistry) cleanupLoop() {
 }
 
 func (r *sessionRegistry) cleanupExpired() {
-	if r.ttl <= 0 {
-		return
-	}
-	now := time.Now()
+	now := r.now()
 	r.mu.Lock()
+	r.pruneTombstonesLocked(now)
 	expired := make([]*engineSession, 0)
-	for id, session := range r.sessions {
-		if now.Sub(session.lastAccess()) > r.ttl {
-			delete(r.sessions, id)
-			expired = append(expired, session)
+	if r.ttl > 0 {
+		for id, session := range r.sessions {
+			if now.Sub(session.lastAccess()) > r.ttl {
+				delete(r.sessions, id)
+				expired = append(expired, session)
+			}
 		}
 	}
 	r.mu.Unlock()

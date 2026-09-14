@@ -11,5 +11,8 @@ sealed interface NntpState {
         val connections: Int = 0
     ) : NntpState
 
-    data class Error(val message: String) : NntpState
+    data class Error(
+        val message: String,
+        val rateLimit: NntpRateLimit? = null
+    ) : NntpState
 }

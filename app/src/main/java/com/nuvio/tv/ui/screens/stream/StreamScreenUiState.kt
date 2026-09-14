@@ -2,6 +2,7 @@ package com.nuvio.tv.ui.screens.stream
 
 import com.nuvio.tv.domain.model.AddonStreams
 import com.nuvio.tv.domain.model.Stream
+import com.nuvio.tv.core.usenet.NntpRateLimit
 import com.nuvio.tv.ui.components.SourceChipItem
 import com.nuvio.tv.ui.components.SourceChipStatus
 
@@ -36,7 +37,9 @@ data class StreamScreenUiState(
     val autoPlayStream: Stream? = null,
     val autoPlayPlaybackInfo: StreamPlaybackInfo? = null,
     val error: String? = null,
-    val playbackErrorMessage: String? = null
+    val playbackErrorMessage: String? = null,
+    val nntpRateLimit: NntpRateLimit? = null,
+    val selectedNntpStream: Stream? = null
 ) {
     val isEpisode: Boolean get() = season != null && episode != null
 }

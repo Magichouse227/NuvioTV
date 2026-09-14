@@ -87,4 +87,39 @@ class NntpServiceLifecycleTest {
         assertFalse(published)
         assertEquals(listOf("superseded-session"), cleaned)
     }
+
+    @Test
+    fun callbackAfterCallerCancellationIsCleanedByAbandonedOwnership() = runTest {
+        val callbackReady = CompletableDeferred<Unit>()
+        val cleaned = mutableListOf<String>()
+        lateinit var lateOnCreated: (String) -> Unit
+
+        val start = launch {
+            try {
+                createNntpSessionSafely(
+                    create = { onCreated ->
+                        lateOnCreated = onCreated
+                        callbackReady.complete(Unit)
+                        "stream-url"
+                    },
+                    publish = {
+                        // Keep the caller in the ownership window until cancellation wins.
+                        kotlinx.coroutines.awaitCancellation()
+                    },
+                    cleanup = { cleaned += it }
+                )
+            } catch (_: CancellationException) {
+                // Expected: cancellation marks the ownership callback as abandoned.
+            }
+        }
+
+        callbackReady.await()
+        start.cancel()
+        start.join()
+        assertTrue(cleaned.isEmpty())
+
+        // Simulates an OkHttp response callback that was already queued when call.cancel() ran.
+        lateOnCreated("late-after-cancel")
+        assertEquals(listOf("late-after-cancel"), cleaned)
+    }
 }
