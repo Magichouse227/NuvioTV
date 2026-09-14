@@ -11,6 +11,7 @@ import com.nuvio.tv.data.remote.supabase.SupabaseProfilePinVerifyResult
 import com.nuvio.tv.domain.model.UserProfile
 import com.nuvio.tv.domain.model.AuthState
 import io.github.jan.supabase.postgrest.Postgrest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -99,9 +100,15 @@ class ProfileSyncService @Inject constructor(
         }
     }
 
-    suspend fun pullFromRemote(force: Boolean = false): Result<List<UserProfile>> = withContext(Dispatchers.IO) {
+    suspend fun pullFromRemote(
+        force: Boolean = false,
+        expectedUserId: String? = null
+    ): Result<List<UserProfile>> = withContext(Dispatchers.IO) {
         pullMutex.withLock {
             val userId = (authManager.authState.value as? AuthState.FullAccount)?.userId
+            if (expectedUserId != null && userId != expectedUserId) {
+                return@withLock Result.success(emptyList())
+            }
             val now = SystemClock.elapsedRealtime()
             if (!force && userId != null && pullFreshness.isRecent(userId, now)) {
                 return@withLock Result.success(lastPulledProfiles)
@@ -128,12 +135,15 @@ class ProfileSyncService @Inject constructor(
                     )
                 }
 
+                val currentUserId = (authManager.authState.value as? AuthState.FullAccount)?.userId
+                if (currentUserId != userId || (expectedUserId != null && currentUserId != expectedUserId)) {
+                    return@withLock Result.success(emptyList())
+                }
                 if (profiles.isNotEmpty()) {
                     profileDataStore.replaceAllProfiles(profiles)
                     Log.d(TAG, "Merged ${profiles.size} remote profiles into local store")
                 }
 
-                val currentUserId = (authManager.authState.value as? AuthState.FullAccount)?.userId
                 if (userId != null && currentUserId == userId) {
                     lastPulledProfiles = profiles
                     pullFreshness = ProfilePullFreshness(
@@ -142,6 +152,8 @@ class ProfileSyncService @Inject constructor(
                     )
                 }
                 Result.success(profiles)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to pull profiles from remote", e)
                 Result.failure(e)

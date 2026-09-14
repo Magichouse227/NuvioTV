@@ -76,6 +76,25 @@ class StartupSyncCoordinatorTest {
     }
 
     @Test
+    fun `manual or realtime request lifetime is invalidated by either identity change`() {
+        val coordinator = StartupSyncCoordinator()
+        val request = StartupSyncCoordinator.Request("account-a", 4, true, true)
+
+        // This is the guard supplied to tracked manual/realtime jobs immediately before their
+        // remote metadata and profile-store mutations.
+        assertEquals(
+            true,
+            coordinator.matchesCurrentIdentity(request, userId = "account-a", profileId = 4)
+        )
+        assertFalse(
+            coordinator.matchesCurrentIdentity(request, userId = "account-b", profileId = 4)
+        )
+        assertFalse(
+            coordinator.matchesCurrentIdentity(request, userId = "account-a", profileId = 5)
+        )
+    }
+
+    @Test
     fun `activity pull holds startup request until activity ownership clears`() {
         val coordinator = StartupSyncCoordinator()
         val startup = StartupSyncCoordinator.Request("account", 1, true, true)
