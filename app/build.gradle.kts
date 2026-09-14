@@ -11,6 +11,7 @@ plugins {
 
 import java.io.File
 import java.util.Properties
+import java.time.Duration
 import org.gradle.api.GradleException
 import org.gradle.api.tasks.Sync
 
@@ -421,7 +422,7 @@ afterEvaluate {
         classpath = original.classpath
         systemProperties(original.systemProperties)
         maxHeapSize = "2g"
-        timeout.set(java.time.Duration.ofMinutes(15))
+        timeout.set(Duration.ofMinutes(15))
         addTestListener(object : org.gradle.api.tasks.testing.TestListener {
             override fun beforeSuite(descriptor: org.gradle.api.tasks.testing.TestDescriptor) = Unit
             override fun beforeTest(descriptor: org.gradle.api.tasks.testing.TestDescriptor) = Unit
