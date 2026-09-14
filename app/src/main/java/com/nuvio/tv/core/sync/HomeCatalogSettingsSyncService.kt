@@ -109,7 +109,7 @@ class HomeCatalogSettingsSyncService @Inject constructor(
             val profileId = profileManager.activeProfileId.value
             val syncScope = currentScope(profileId)
                 ?: return@withContext Result.success(Unit)
-            val payload = loadLocalPayload()
+            val payload = loadLocalPayload(profileId)
             Log.d(TAG, "Push start profile=$profileId reason=$reason ${payload.summary()}")
             pushPayload(syncScope, payload)
 
