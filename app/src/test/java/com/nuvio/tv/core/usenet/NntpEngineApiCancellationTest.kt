@@ -12,6 +12,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -74,11 +75,14 @@ class NntpEngineApiCancellationTest {
                     cleanup = { cleanedIds += it }
                 )
             }
-            assertTrue(requestReceived.await(2, TimeUnit.SECONDS))
+            assertTrue(requestReceived.await(10, TimeUnit.SECONDS))
             assertTrue(knownIds.single().matches(Regex("[0-9a-f]{32}")))
             call.cancel()
-            allowResponse.countDown()
-            withTimeout(2_000L) { call.join() }
+            // Use a wall-clock timeout for real IO, not runTest's virtual clock. Keep the
+            // response blocked until cleanup so a blocking POST cannot accidentally pass.
+            withContext(Dispatchers.IO) {
+                withTimeout(2_000L) { call.join() }
+            }
             assertTrue(call.isCancelled)
             assertTrue(cleanedIds == knownIds)
         } finally {

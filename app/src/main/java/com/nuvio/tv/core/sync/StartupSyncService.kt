@@ -121,16 +121,6 @@ class StartupSyncService @Inject constructor(
                     }
                     is AuthState.SignedOut -> {
                         synchronized(startupStateLock) {
-                            // An active pull can be in a DataStore write. Let it leave its
-                            // profile-scoped write consistent, but never run queued old-account
-                            // work after sign-out.
-                            startupSyncCoordinator.discardPending()
-                            startupPullJob?.cancel(
-                                CancellationException("Account signed out during startup sync")
-                            )
-                            activityPullJob?.cancel(
-                                CancellationException("Account signed out during activity sync")
-                            )
                             cancelIdentityBoundWorkLocked("Account signed out")
                             authenticatedUserId = null
                             periodicSurfacePullJob?.cancel()
@@ -254,21 +244,21 @@ class StartupSyncService @Inject constructor(
             // All remote reads below are cancellable and every DataStore mutation is atomic.
             // Cancelling is therefore safer than allowing an old account/profile request to
             // continue into another profile's active stores.
-            startupPullJob?.cancel(
-                CancellationException("Active profile changed during startup sync")
-            )
-            activityPullJob?.cancel(
-                CancellationException("Active profile changed during activity sync")
-            )
             cancelIdentityBoundWorkLocked("Active profile changed")
         }
     }
 
     private fun cancelIdentityBoundWorkLocked(reason: String) {
-        identityBoundJobs.forEach { job ->
-            job.cancel(CancellationException(reason))
-        }
-        identityBoundJobs.clear()
+        startupSyncCoordinator.cancelIdentityWork(
+            cancelStartupPull = { startupPullJob?.cancel(CancellationException(reason)) },
+            cancelActivityPull = { activityPullJob?.cancel(CancellationException(reason)) },
+            cancelAuxiliaryPulls = {
+                // Snapshot before cancellation: job completion removes itself from the set.
+                val jobs = identityBoundJobs.toList()
+                identityBoundJobs.clear()
+                jobs.forEach { it.cancel(CancellationException(reason)) }
+            }
+        )
     }
 
     private fun launchIdentityBound(

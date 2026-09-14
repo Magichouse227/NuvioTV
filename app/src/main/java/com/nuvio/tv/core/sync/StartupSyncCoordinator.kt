@@ -68,6 +68,22 @@ internal class StartupSyncCoordinator {
         pending = null
     }
 
+    /**
+     * Every identity transition must cancel all three kinds of owned work, including a direct
+     * signed-in account A -> B transition. Keep ownership until the cancelled jobs' finally
+     * blocks finish, so a new account's queued request cannot overlap the old owner.
+     */
+    fun cancelIdentityWork(
+        cancelStartupPull: () -> Unit,
+        cancelActivityPull: () -> Unit,
+        cancelAuxiliaryPulls: () -> Unit
+    ) {
+        discardPending()
+        cancelStartupPull()
+        cancelActivityPull()
+        cancelAuxiliaryPulls()
+    }
+
     private fun Request.merge(newer: Request): Request {
         // The most recently resolved account/profile identity wins. Settings coverage and force
         // are monotonic so a manual request is never silently weakened by a lifecycle request.

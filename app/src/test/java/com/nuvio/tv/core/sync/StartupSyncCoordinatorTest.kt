@@ -104,4 +104,47 @@ class StartupSyncCoordinatorTest {
         assertEquals(startup, coordinator.finishActivity())
         assertEquals(startup, coordinator.enqueue(startup))
     }
+
+    @Test
+    fun `direct account change cancels every job kind while retaining activity ownership`() {
+        val coordinator = StartupSyncCoordinator()
+        val accountA = StartupSyncCoordinator.Request("account-a", 1, true, true)
+        val accountB = StartupSyncCoordinator.Request("account-b", 1, false, true)
+        val cancelled = mutableListOf<String>()
+        coordinator.beginActivity()
+        coordinator.enqueue(accountA)
+
+        coordinator.cancelIdentityWork(
+            cancelStartupPull = { cancelled += "startup" },
+            cancelActivityPull = { cancelled += "activity" },
+            cancelAuxiliaryPulls = { cancelled += "auxiliary" }
+        )
+
+        assertEquals(listOf("startup", "activity", "auxiliary"), cancelled)
+        assertFalse(coordinator.beginActivity())
+        assertNull(coordinator.enqueue(accountB))
+        // The old account's pending force flag must not leak to B.
+        assertEquals(accountB, coordinator.finishActivity())
+    }
+
+    @Test
+    fun `account change drops old followups but lets a new account queue behind startup cleanup`() {
+        val coordinator = StartupSyncCoordinator()
+        val accountA = StartupSyncCoordinator.Request("account-a", 1, false, false)
+        val oldFollowup = accountA.copy(force = true, includeProfileSettings = true)
+        val accountB = StartupSyncCoordinator.Request("account-b", 1, false, false)
+        var startupCancelled = false
+        coordinator.enqueue(accountA)
+        coordinator.enqueue(oldFollowup)
+
+        coordinator.cancelIdentityWork(
+            cancelStartupPull = { startupCancelled = true },
+            cancelActivityPull = {},
+            cancelAuxiliaryPulls = {}
+        )
+
+        assertEquals(true, startupCancelled)
+        assertNull(coordinator.enqueue(accountB))
+        assertEquals(accountB, coordinator.finish(accountA))
+    }
 }

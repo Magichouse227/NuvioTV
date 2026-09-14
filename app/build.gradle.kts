@@ -421,6 +421,34 @@ afterEvaluate {
         classpath = original.classpath
         systemProperties(original.systemProperties)
         maxHeapSize = "2g"
+        timeout.set(java.time.Duration.ofMinutes(15))
+        addTestListener(object : org.gradle.api.tasks.testing.TestListener {
+            override fun beforeSuite(descriptor: org.gradle.api.tasks.testing.TestDescriptor) = Unit
+            override fun beforeTest(descriptor: org.gradle.api.tasks.testing.TestDescriptor) = Unit
+            override fun afterSuite(
+                descriptor: org.gradle.api.tasks.testing.TestDescriptor,
+                result: org.gradle.api.tasks.testing.TestResult
+            ) {
+                if (descriptor.parent == null) {
+                    logger.lifecycle("::notice title=Native regression results::" +
+                        "${result.testCount} tests, ${result.failedTestCount} failed, " +
+                        "${result.skippedTestCount} skipped")
+                }
+            }
+            override fun afterTest(
+                descriptor: org.gradle.api.tasks.testing.TestDescriptor,
+                result: org.gradle.api.tasks.testing.TestResult
+            ) {
+                if (result.resultType == org.gradle.api.tasks.testing.TestResult.ResultType.FAILURE) {
+                    // Annotations remain accessible even when GitHub's redirected log archive
+                    // cannot be downloaded. Never include environment/configuration values.
+                    val detail = (descriptor.name + "\n" +
+                        result.exceptions.joinToString("\n") { it.stackTraceToString() })
+                        .take(8_000).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                    logger.lifecycle("::error title=${descriptor.className}::$detail")
+                }
+            }
+        })
         filter {
             includeTestsMatching("com.nuvio.tv.core.sync.*")
             includeTestsMatching("com.nuvio.tv.core.startup.*")
