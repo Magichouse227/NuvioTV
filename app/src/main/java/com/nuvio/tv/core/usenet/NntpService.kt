@@ -20,6 +20,12 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** Cancellation can enqueue cleanup while the previous start is finishing. Snapshot it afterward. */
+internal suspend fun awaitNntpStartCleanup(previousStart: Job?, latestCleanup: () -> Job?) {
+    previousStart?.join()
+    latestCleanup()?.join()
+}
+
 /**
  * Keeps a session ID observable across the cancellation boundary around an in-flight create call.
  * The create implementation must invoke [onCreated] once it has a protocol identity, before
@@ -172,11 +178,10 @@ class NntpService @Inject constructor(
         try {
             // A previous start can still be finishing its cancellation and session release. Wait
             // for that coroutine before starting another request.
-            start.previousStart?.let { previous ->
-                if (previous !== callerJob) previous.join()
-            }
             start.prewarmStop?.join()
-            start.previousCleanup?.join()
+            awaitNntpStartCleanup(start.previousStart?.takeIf { it !== callerJob }) {
+                synchronized(lifecycleLock) { cleanupJob }
+            }
 
             require(nzbUrl.isNotBlank()) { "NZB URL is blank" }
             require(servers.isNotEmpty()) { "NNTP servers are missing" }
@@ -316,7 +321,6 @@ class NntpService @Inject constructor(
     private data class StartReservation(
         val generation: Long,
         val previousStart: Job?,
-        val previousCleanup: Job?,
         val prewarmStop: Job?,
         val duplicate: Boolean = false,
         val existingStreamUrl: String? = null
@@ -343,7 +347,6 @@ class NntpService @Inject constructor(
             return StartReservation(
                 generation = generation,
                 previousStart = null,
-                previousCleanup = null,
                 prewarmStop = null,
                 existingStreamUrl = currentStreamUrl
             )
@@ -355,7 +358,6 @@ class NntpService @Inject constructor(
             return StartReservation(
                 generation = generation,
                 previousStart = null,
-                previousCleanup = null,
                 prewarmStop = null,
                 duplicate = true
             )
@@ -373,14 +375,13 @@ class NntpService @Inject constructor(
         currentStreamUrl = null
         currentStartRequest = null
         scheduleSessionCleanupLocked(sessionId)
-        val previousCleanup = cleanupJob
 
         val prewarmStop = prewarmShutdownJob
         prewarmShutdownJob = null
         previousStart?.cancel()
         prewarmStop?.cancel()
         _state.value = NntpState.Idle
-        StartReservation(nextGeneration, previousStart, previousCleanup, prewarmStop)
+        StartReservation(nextGeneration, previousStart, prewarmStop)
     }
 
     private fun scheduleSessionCleanupLocked(

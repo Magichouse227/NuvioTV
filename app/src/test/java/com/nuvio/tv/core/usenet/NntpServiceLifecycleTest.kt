@@ -2,6 +2,8 @@ package com.nuvio.tv.core.usenet
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
@@ -12,6 +14,37 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NntpServiceLifecycleTest {
+    @Test
+    fun replacementWaitsForCleanupQueuedByCancelledStart() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val cleanupStarted = CompletableDeferred<Unit>()
+        val releaseCleanup = CompletableDeferred<Unit>()
+        var cleanupJob: Job? = null
+        var replacementCreated = false
+        val cleanupScope = backgroundScope
+        val previous = launch {
+            try {
+                started.complete(Unit)
+                awaitCancellation()
+            } finally {
+                cleanupJob = cleanupScope.launch {
+                    cleanupStarted.complete(Unit)
+                    releaseCleanup.await()
+                }
+            }
+        }
+        started.await()
+        previous.cancel()
+        val replacement = launch {
+            awaitNntpStartCleanup(previous) { cleanupJob }
+            replacementCreated = true
+        }
+        cleanupStarted.await()
+        assertFalse(replacementCreated)
+        releaseCleanup.complete(Unit)
+        replacement.join()
+        assertTrue(replacementCreated)
+    }
 
     @Test
     fun cancellationDuringCommittedCreateCleansLateSessionWithoutPublishing() = runTest {
