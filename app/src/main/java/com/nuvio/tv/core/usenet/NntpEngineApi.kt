@@ -176,7 +176,7 @@ class NntpEngineApi @Inject constructor(
         try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext null
-                val json = JSONObject(response.body.string())
+                val json = JSONObject(response.body?.string().orEmpty())
                 NntpSessionStats(
                     downloadedBytes = json.optLong("downloadedBytes"),
                     downloadSpeed = json.optLong("downloadSpeed"),

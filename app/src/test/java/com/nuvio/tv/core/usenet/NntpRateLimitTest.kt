@@ -41,7 +41,7 @@ class NntpRateLimitTest {
                 "(app retry delay).",
             limit.userMessage(1_000L)
         )
-        assertTrue(limit.userMessage(60_000L).contains("retry manually"))
+        assertTrue(limit.userMessage(60_000L).contains("retry the selected stream manually"))
     }
 
     @Test
@@ -120,9 +120,9 @@ class NntpRateLimitTest {
     @Test
     fun cooldownIsNzbOriginScopedAndIndependentOfNntpProvider() {
         val policy = NntpCooldownPolicy({ 10_000L })
-        val first = policy.originForNzbUrl("HTTP://user:secret@Nzb.Example.:80/path/a.nzb?token=one")
-        val equivalent = policy.originForNzbUrl("http://other:password@nzb.example/path/b.nzb")
-        val other = policy.originForNzbUrl("https://nzb.example/path/a.nzb")
+        val first = NntpCooldownPolicy.originForNzbUrl("HTTP://user:secret@Nzb.Example.:80/path/a.nzb?token=one")
+        val equivalent = NntpCooldownPolicy.originForNzbUrl("http://other:password@nzb.example/path/b.nzb")
+        val other = NntpCooldownPolicy.originForNzbUrl("https://nzb.example/path/a.nzb")
 
         assertEquals("http://nzb.example:80", first)
         assertEquals(first, equivalent)
