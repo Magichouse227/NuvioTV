@@ -1,5 +1,6 @@
 package com.nuvio.tv.ui.screens.settings
 
+import com.nuvio.tv.core.performance.DevicePerformance
 import androidx.media3.common.util.UnstableApi
 import com.nuvio.tv.data.local.BufferSettings
 import com.nuvio.tv.data.local.PlayerSettings
@@ -55,10 +56,12 @@ object MemoryBudget {
     private val rawBudgetMb: Int =
         (maxHeapMb * (if (isLowRamTier) LOW_HEAP_RATIO else HIGH_HEAP_RATIO)).toInt()
 
-    val budgetMb: Int =
+    private val heapBudgetMb: Int =
         if (isLowRamTier)
             rawBudgetMb.coerceAtMost((maxHeapMb - LOW_HEAP_RESERVE_MB).toInt()).coerceAtLeast(MIN_BUFFER_MB)
         else rawBudgetMb
+
+    val budgetMb: Int get() = heapBudgetMb.coerceAtMost(DevicePerformance.policy.playerBufferMb)
 
     // DV7 conversion headroom: a third of the raw budget on low-RAM, half on high-RAM; never above budget.
     val conversionBudgetMb: Int =
@@ -96,7 +99,9 @@ object MemoryBudget {
     /** Slider max for target buffer, optionally raised to 2GB when override is on. */
     fun maxBufferMbWithOverride(parallelOverheadMb: Int, allowLargeTargetBuffer: Boolean): Int {
         val safeMax = maxBufferMb(parallelOverheadMb)
-        return if (allowLargeTargetBuffer) {
+        return if (DevicePerformance.lightweight) {
+            safeMax
+        } else if (allowLargeTargetBuffer) {
             PlayerSettings.LARGE_TARGET_BUFFER_MAX_MB
                 .coerceAtMost(MAX_BUFFER_MB)
                 .coerceAtLeast(safeMax)

@@ -1,5 +1,6 @@
 package com.nuvio.tv.ui.screens.player
 
+import com.nuvio.tv.core.performance.DevicePerformance
 import android.content.Context
 import android.content.res.Resources
 import android.graphics.RectF
@@ -482,7 +483,7 @@ internal fun PlayerRuntimeController.initializePlayer(
             val parallelActive = playerSettings.parallelNetworkEnabled && playerSettings.useParallelConnections
             val mp4SessionMode = !parallelActive && !isHlsStream && !isDashStream &&
                 resolvedStreamMime == MimeTypes.VIDEO_MP4
-            val useChunkSessionSource = (parallelActive || mp4SessionMode) &&
+            val useChunkSessionSource = !DevicePerformance.lightweight && (parallelActive || mp4SessionMode) &&
                 !isHlsStream && !isDashStream
 
             val parallelOverheadMb = if (useChunkSessionSource) {
@@ -517,7 +518,7 @@ internal fun PlayerRuntimeController.initializePlayer(
                     (MemoryBudget.effectiveBufferMb(bufferSettings.targetBufferSizeMb) - parallelOverheadMb)
                         .coerceAtLeast(MemoryBudget.MIN_BUFFER_MB)
                 }
-                val budgetBytes = budgetMbEffective.toLong() * 1024L * 1024L
+                val budgetBytes = budgetMbEffective.coerceAtMost(DevicePerformance.policy.playerBufferMb).toLong() * 1024L * 1024L
                 // Build with the user's back buffer so seek-back works immediately (it can't
                 // depend on the player re-polling the LoadControl). First frame only lowers it
                 // to 0 for confirmed DV7 on low-RAM; everything else keeps it.
@@ -550,7 +551,7 @@ internal fun PlayerRuntimeController.initializePlayer(
                     // met. Without this, high-bitrate remux files (e.g. 100+ Mbps UHD MKV with
                     // multiple audio tracks) exhaust the 500MB byte cap in <5s of content before
                     // minBufferMs is satisfied, leaving ExoPlayer stuck in STATE_BUFFERING.
-                    prioritizeTimeOverSizeThresholds = true,
+                    prioritizeTimeOverSizeThresholds = !DevicePerformance.lightweight,
                     backBufferDurationMs = backBufferMsAtBuild,
                     retainBackBufferFromKeyframe = true,
                     budgetBytes = budgetBytes,
@@ -566,6 +567,7 @@ internal fun PlayerRuntimeController.initializePlayer(
                             "(1.5s back buffer, no VOD cache) host=${url.safeHost()}"
                 )
                 DefaultLoadControl.Builder()
+                    .apply { if (DevicePerformance.lightweight) setTargetBufferBytes(32 * 1024 * 1024) }
                     .setBackBuffer(1_500, /* retainBackBufferFromKeyframe = */ true)
                     .build()
             }

@@ -1,5 +1,6 @@
 package com.nuvio.tv
 
+import com.nuvio.tv.core.performance.DevicePerformance
 import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
@@ -77,6 +78,7 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
+        DevicePerformance.initialize(this)
         SentryInitializer.start(this, sentrySettingsDataStore)
         PluginRuntimeHooks.onApplicationCreate(this)
         androidTvChannelSyncService.start()
@@ -88,10 +90,12 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {
+        DevicePerformance.initialize(context)
+        val policy = DevicePerformance.policy
         val imageOkHttpClient by lazy {
             val imageDispatcher = okhttp3.Dispatcher().apply {
-                maxRequests = 32
-                maxRequestsPerHost = 16
+                maxRequests = policy.imageRequests
+                maxRequestsPerHost = policy.imageRequestsPerHost
             }
             OkHttpClient.Builder()
                 .dispatcher(imageDispatcher)
@@ -117,10 +121,10 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
 
         return ImageLoader.Builder(this)
             .components {
-                if (Build.VERSION.SDK_INT >= 28) {
-                    add(AnimatedImageDecoder.Factory())
-                } else {
-                    add(GifDecoder.Factory())
+                // On 1 GB sticks display still artwork without running animated decoders.
+                if (!policy.lightweight) {
+                    if (Build.VERSION.SDK_INT >= 28) add(AnimatedImageDecoder.Factory())
+                    else add(GifDecoder.Factory())
                 }
                 add(SvgDecoder.Factory())
                 add(
@@ -151,20 +155,20 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
                     else -> 0.25
                 }
                 MemoryCache.Builder()
-                    .maxSizePercent(context, cachePercent)
+                    .maxSizeBytes(minOf((Runtime.getRuntime().maxMemory() * cachePercent).toLong(), policy.imageCacheBytes))
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache").toOkioPath())
-                    .maxSizeBytes(200L * 1024 * 1024)
+                    .maxSizeBytes(policy.imageDiskCacheBytes)
                     .build()
             }
             .crossfade(false)
             .precision(coil3.size.Precision.INEXACT)
             .allowHardware(false)
             .allowRgb565(imagePerformancePreferences.rgb565Enabled)
-            .bitmapFactoryMaxParallelism(4)
+            .bitmapFactoryMaxParallelism(policy.imageDecoders)
             .build()
     }
 }

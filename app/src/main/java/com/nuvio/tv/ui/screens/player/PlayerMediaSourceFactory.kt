@@ -1,5 +1,6 @@
 package com.nuvio.tv.ui.screens.player
 
+import com.nuvio.tv.core.performance.DevicePerformance
 import android.content.Context
 import android.net.Uri
 import android.util.Log
@@ -116,7 +117,8 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
 
         val mp4SessionMode = !useParallelConnections && !isHls && !isDash &&
             resolvedMimeType == MimeTypes.VIDEO_MP4
-        val useChunkSessionSource = (useParallelConnections || mp4SessionMode) && !isHls && !isDash
+        val useChunkSessionSource = !DevicePerformance.lightweight &&
+            (useParallelConnections || mp4SessionMode) && !isHls && !isDash
         parallelStartupPrefetchUnlocked.set(!useChunkSessionSource)
         val progressiveUpstreamFactory: DataSource.Factory = if (useChunkSessionSource) {
             if (mp4SessionMode) {
