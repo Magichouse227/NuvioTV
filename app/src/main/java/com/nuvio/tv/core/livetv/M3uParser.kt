@@ -86,7 +86,7 @@ object M3uParser {
         return result.values.toList()
     }
 
-    fun channelId(sourceId: String, value: String): String = MessageDigest.getInstance("SHA-256")
+    fun channelId(sourceId: String, value: String): String = "$sourceId:" + MessageDigest.getInstance("SHA-256")
         .digest("$sourceId\n$value".toByteArray(Charsets.UTF_8))
         .joinToString("") { byte ->
             val valueByte = byte.toInt() and 0xff
