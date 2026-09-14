@@ -429,7 +429,10 @@ class StartupSyncService @Inject constructor(
                     }
                 }
                 "profile_settings" -> {
-                    profileSettingsSyncService.pullProfileFromRemote(profileId)
+                    profileSettingsSyncService.pullProfileFromRemote(
+                        profileId,
+                        canApply = { isCurrentContext(userId, profileId) }
+                    )
                         .onSuccess { applied ->
                             Log.d(TAG, "Realtime profile settings pull completed profile=$profileId applied=$applied")
                         }
@@ -849,7 +852,10 @@ class StartupSyncService @Inject constructor(
 
         if (includeProfileSettings) {
             requireCurrentContext(userId, profileId)
-            profileSettingsSyncService.pullProfileFromRemote(profileId)
+            profileSettingsSyncService.pullProfileFromRemote(
+                profileId,
+                canApply = { isCurrentContext(userId, profileId) }
+            )
                 .onSuccess { applied ->
                     Log.d(TAG, "Profile settings blob pull completed for profile $profileId (applied=$applied)")
                 }

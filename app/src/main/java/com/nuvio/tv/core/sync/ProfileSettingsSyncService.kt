@@ -234,10 +234,15 @@ class ProfileSettingsSyncService @Inject constructor(
      * Pulls and applies settings for the supplied profile rather than consulting activeProfileId
      * after a startup request has already captured its identity.
      */
-    suspend fun pullProfileFromRemote(profileId: Int): Result<Boolean> = withContext(Dispatchers.IO) {
+    suspend fun pullProfileFromRemote(
+        profileId: Int,
+        canApply: () -> Boolean = { true }
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
             try {
+                if (!canApply()) throw CancellationException("Profile settings request is stale")
                 val blob = fetchProfileBlob(profileId)
+                if (!canApply()) throw CancellationException("Profile settings request is stale")
                 lastForegroundPullAtMs = SystemClock.elapsedRealtime()
                 if (blob == null) {
                     Log.d(TAG, "No remote profile settings blob for profile $profileId; keeping local settings")
@@ -252,6 +257,9 @@ class ProfileSettingsSyncService @Inject constructor(
                     return@withLock Result.success(false)
                 }
 
+                // Cancellation observers can run after a remote response resumes; check the
+                // captured account/profile again at the mutation boundary.
+                if (!canApply()) throw CancellationException("Profile settings request is stale")
                 applySettingsBlob(profileId, featuresJson, remoteSignature)
                 Log.d(TAG, "Applied remote profile settings blob for profile $profileId")
                 Result.success(true)
