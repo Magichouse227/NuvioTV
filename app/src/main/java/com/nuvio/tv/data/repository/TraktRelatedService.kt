@@ -47,13 +47,17 @@ class TraktRelatedService @Inject constructor(
         meta: Meta,
         fallbackItemId: String? = null,
         fallbackItemType: String? = null,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        page: Int = 1
     ): List<MetaPreview> {
+        require(page in 1..500)
         val target = resolveRelatedTarget(meta, fallbackItemId, fallbackItemType) ?: return emptyList()
         val cacheKey = buildString {
             append(target.type.apiValue)
             append("|")
             append(target.pathId)
+            append("|")
+            append(page)
         }
 
         if (!forceRefresh) {
@@ -72,7 +76,8 @@ class TraktRelatedService @Inject constructor(
                     traktApi.getMovieRelated(
                         authorization = authHeader,
                         id = target.pathId,
-                        limit = RELATED_LIMIT
+                        limit = RELATED_LIMIT,
+                        page = page
                     )
                 } ?: throw IllegalStateException(appContext.getString(com.nuvio.tv.R.string.trakt_related_error_request_failed))
 
@@ -94,7 +99,8 @@ class TraktRelatedService @Inject constructor(
                     traktApi.getShowRelated(
                         authorization = authHeader,
                         id = target.pathId,
-                        limit = RELATED_LIMIT
+                        limit = RELATED_LIMIT,
+                        page = page
                     )
                 } ?: throw IllegalStateException(appContext.getString(com.nuvio.tv.R.string.trakt_related_error_request_failed))
 
@@ -113,6 +119,7 @@ class TraktRelatedService @Inject constructor(
         }
 
         val distinctItems = items.distinctBy { "${it.apiType}:${it.id}" }
+        if (cache.size >= 32) cache.clear()
         cache[cacheKey] = TimedCache(items = distinctItems, updatedAtMs = System.currentTimeMillis())
         return distinctItems
     }

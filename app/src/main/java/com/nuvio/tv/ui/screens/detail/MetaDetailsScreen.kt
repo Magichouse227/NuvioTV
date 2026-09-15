@@ -2029,6 +2029,8 @@ private fun MetaDetailsContent(
                             PeopleSectionTab.MORE_LIKE_THIS -> {
                                 MoreLikeThisSection(
                                     items = moreLikeThis,
+                                    meta = meta,
+                                    source = moreLikeThisSource,
                                     sourceLabel = moreLikeThisSourceLabel,
                                     posterCardCornerRadius = posterCardCornerRadiusDp.dp,
                                     upFocusRequester = if (hasVisiblePeopleTabs) moreLikeTabFocusRequester else seasonDownFocusRequester ?: heroPlayFocusRequester,
