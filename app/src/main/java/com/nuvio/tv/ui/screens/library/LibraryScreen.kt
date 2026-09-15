@@ -137,6 +137,8 @@ fun LibraryScreen(
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var expandedPicker by remember { mutableStateOf<String?>(null) }
     var viewMode by rememberSaveable { mutableStateOf(LibraryViewMode.Saved) }
+    var showCalendar by remember { mutableStateOf(false) }
+    if (showCalendar) LibraryCalendarDialog(uiState.allItems, { showCalendar = false }, onNavigateToDetail)
     var activeCloudItem by remember { mutableStateOf<CloudLibraryItem?>(null) }
     var pendingCloudPlayback by remember { mutableStateOf<CloudLibraryPlaybackInfo?>(null) }
     var showCloudPlayerChoice by remember { mutableStateOf(false) }
@@ -321,7 +323,7 @@ fun LibraryScreen(
                     viewMode = mode
                     expandedPicker = null
                 },
-                // Refresh belongs to the cloud view only, pinned right in line with the tabs.
+                // Calendar uses the current saved library provider; cloud keeps its refresh control.
                 trailing = if (viewMode == LibraryViewMode.Cloud) {
                     {
                         Button(
@@ -342,7 +344,7 @@ fun LibraryScreen(
                         }
                     }
                 } else {
-                    null
+                    { Button(onClick = { showCalendar = true }, enabled = !uiState.isLoading) { Text("Calendar") } }
                 }
             )
         }

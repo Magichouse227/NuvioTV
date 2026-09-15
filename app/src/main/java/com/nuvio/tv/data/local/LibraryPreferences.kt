@@ -53,10 +53,11 @@ class LibraryPreferences @Inject constructor(
 
     val libraryItems: Flow<List<SavedLibraryItem>> =
         profileManager.activeProfileId.flatMapLatest { profileId ->
-            factory.get(profileId, FEATURE).data.map { preferences ->
-                preferences.toLibrarySyncState().items
-            }
+            observeItems(profileId)
         }
+
+    fun observeItems(profileId: Int): Flow<List<SavedLibraryItem>> =
+        factory.get(profileId, FEATURE).data.map { it.toLibrarySyncState().items }
 
     suspend fun setSortOption(key: String) {
         store().edit { preferences ->

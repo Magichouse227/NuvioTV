@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -21,6 +22,8 @@ internal fun ProfileSettingsContent(
     onManageProfiles: () -> Unit,
     initialFocusRequester: FocusRequester? = null
 ) {
+    var showInsights by remember { mutableStateOf(false) }
+    if (showInsights) ProfileInsightsDialog(onDismiss = { showInsights = false })
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
@@ -40,6 +43,8 @@ internal fun ProfileSettingsContent(
                     Modifier
                 }
             )
+            SettingsActionRow(title = "Profile insights", subtitle = "Watch history, activity and saved genres",
+                onClick = { showInsights = true })
         }
     }
 }
