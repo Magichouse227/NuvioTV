@@ -1,10 +1,14 @@
 package com.nuvio.tv.ui.screens.settings
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -91,7 +95,7 @@ internal fun ProfileInsightsDialog(onDismiss: () -> Unit, viewModel: ProfileInsi
                 if (state.genres.isEmpty()) Text("Save titles with genre information to see your taste profile.")
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(state.genres, key = { it.first }) { (genre, count) ->
-                        Text("$genre  ·  $count titles", style = MaterialTheme.typography.titleMedium)
+                        InsightsRow("$genre  ·  $count titles")
                     }
                 }
             }
@@ -106,10 +110,27 @@ internal fun ProfileInsightsDialog(onDismiss: () -> Unit, viewModel: ProfileInsi
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     items(state.recent, key = { "${it.contentType}:${it.contentId}:${it.season}:${it.episode}" }) { item ->
                         val episode = if (item.season != null && item.episode != null) " · S${item.season} E${item.episode}" else ""
-                        Text(item.title + episode, color = NuvioTheme.colors.TextPrimary)
+                        InsightsRow(item.title + episode)
                     }
                 }
             }
         }
     }
+}
+
+/** Focusable read-only rows let a TV remote reveal every item in the lazy list. */
+@Composable
+private fun InsightsRow(text: String) {
+    var focused by remember { mutableStateOf(false) }
+    Text(
+        text = text,
+        color = NuvioTheme.colors.TextPrimary,
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused }
+            .background(if (focused) NuvioTheme.colors.Primary.copy(alpha = 0.24f) else Color.Transparent)
+            .focusable()
+            .padding(12.dp)
+    )
 }
