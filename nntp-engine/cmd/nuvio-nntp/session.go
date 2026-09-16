@@ -114,13 +114,27 @@ func newEngineSessionContextWithCoordinator(
 	}
 	providers, err := parseProviders(request.Servers)
 	if err != nil {
-		return nil, err
+		return nil, setupFailure("provider_configuration", err)
 	}
+
+	// Authenticate in parallel with NZB loading. The lease is released on every
+	// early exit; successfully validated connections remain reusable in the cache.
+	providerStarted := time.Now()
+	providerLease, err := providerCache.acquire(providers)
+	if err != nil {
+		return nil, setupFailure("provider_connection", err)
+	}
+	leaseOwned := true
+	defer func() {
+		if leaseOwned {
+			providerLease.release()
+		}
+	}()
 
 	loadStarted := time.Now()
 	document, loadMetrics, err := downloadAndParseNZBContext(startupCtx, request.NZBURL, httpClient, coordinator)
 	if err != nil {
-		return nil, err
+		return nil, setupFailure("nzb_load_failed", err)
 	}
 	logger.Info(
 		"NNTP session startup phase",
@@ -146,24 +160,12 @@ func newEngineSessionContextWithCoordinator(
 	contentFiles := document.GetSessionContentFilesForEpisode(contentSeason, contentEpisode, 0)
 	logStartupPhase(id, "select_nzb_content", selectStarted)
 	if len(contentFiles) == 0 {
-		return nil, fmt.Errorf("NZB contains no playable content")
+		return nil, setupFailure("no_playable_content", fmt.Errorf("NZB contains no playable content"))
 	}
-
-	providerStarted := time.Now()
-	providerLease, err := providerCache.acquire(providers)
-	if err != nil {
-		return nil, err
-	}
-	leaseOwned := true
-	defer func() {
-		if leaseOwned {
-			providerLease.release()
-		}
-	}()
 
 	providerWaitStarted := time.Now()
 	if err := providerLease.awaitReadyContext(startupCtx); err != nil {
-		return nil, err
+		return nil, setupFailure("provider_connection", err)
 	}
 	logger.Info(
 		"NNTP session startup phase",

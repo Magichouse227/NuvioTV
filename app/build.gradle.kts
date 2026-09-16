@@ -165,7 +165,7 @@ android {
         applicationId = "com.nuvio.tv"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1059
+        versionCode = 1060
         versionName = "0.9.2-beta"
         buildConfigField(
             "String",
@@ -415,7 +415,7 @@ afterEvaluate {
     val standardTests = tasks.named<Test>("testFullDebugUnitTest")
     val performanceTests = tasks.register<Test>("testFullDebugPerformance") {
         group = "verification"
-        description = "Checks startup readiness, profile isolation and bounded browsing."
+        description = "Checks combined Enhanced/NNTP playback, startup, profile isolation and bounded browsing."
         dependsOn(standardTests)
         val original = standardTests.get()
         testClassesDirs = original.testClassesDirs
@@ -461,9 +461,12 @@ afterEvaluate {
             includeTestsMatching("com.nuvio.tv.ui.screens.home.*")
             includeTestsMatching("com.nuvio.tv.data.repository.*")
             includeTestsMatching("com.nuvio.tv.data.local.ImagePerformancePreferencesTest")
-            includeTestsMatching("com.nuvio.tv.core.usenet.NntpRateLimitTest")
-            includeTestsMatching("com.nuvio.tv.core.usenet.NntpEngineApiCancellationTest")
-            includeTestsMatching("com.nuvio.tv.core.usenet.NntpStartupGateTest")
+            includeTestsMatching("com.nuvio.tv.core.usenet.*")
+            includeTestsMatching("com.nuvio.tv.core.livetv.*")
+            includeTestsMatching("com.nuvio.tv.core.performance.*")
+            includeTestsMatching("com.nuvio.tv.core.tmdb.TmdbMetadataServiceTest")
+            includeTestsMatching("com.nuvio.tv.ui.screens.detail.RandomEpisodePolicyTest")
+            includeTestsMatching("com.nuvio.tv.data.mapper.StreamNzbMapperTest")
             includeTestsMatching("com.nuvio.tv.ui.screens.player.PlayerRuntimeErrorRecoveryPolicyTest")
         }
     }
@@ -484,6 +487,7 @@ afterEvaluate {
                         "python3", "scripts/verify-test-apk.py",
                         "app/build/outputs/apk/full/debug/app-full-universal-debug.apk",
                         "--build-sha", providers.environmentVariable("GITHUB_SHA").get(),
+                        "--minimum-version", "1060",
                         "--native-dir",
                         "app/build/intermediates/stripped_native_libs/fullDebug/stripFullDebugDebugSymbols/out/lib",
                         "--aapt", tools.resolve("aapt").absolutePath,

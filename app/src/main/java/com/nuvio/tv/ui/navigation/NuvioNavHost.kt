@@ -1161,6 +1161,23 @@ private fun PlaybackNavHost(
             )
         }
 
+        composable(Screen.LiveTv.route) {
+            com.nuvio.tv.ui.screens.livetv.LiveTvScreen(
+                onSettings = { navController.navigate(Screen.LiveTvSettings.route) },
+                onPlay = { channel, profileId ->
+                    navController.navigate(Screen.Player.createRoute(
+                        streamUrl = channel.url, title = channel.name, streamName = channel.name,
+                        headers = channel.headers, contentId = channel.id, contentType = "channel",
+                        contentName = channel.name, poster = channel.logo, videoId = channel.id,
+                        profileId = profileId
+                    ))
+                }
+            )
+        }
+        composable(Screen.LiveTvSettings.route) {
+            com.nuvio.tv.ui.screens.livetv.LiveTvSettingsContent(onBack = { navController.popBackStack() })
+        }
+
         composable(Screen.Library.route) {
             LibraryScreen(
                 showBuiltInHeader = !hideBuiltInHeaders,

@@ -196,6 +196,16 @@ fun TmdbSettingsContent(
                     )
                 }
 
+                item(key = "tmdb_episode_ratings") {
+                    SettingsToggleRow(
+                        title = "Episode ratings",
+                        subtitle = "Use TMDB vote averages when enriching episodes",
+                        checked = uiState.useEpisodeRatings,
+                        enabled = uiState.enabled,
+                        onToggle = { viewModel.onEvent(TmdbSettingsEvent.ToggleEpisodeRatings(!uiState.useEpisodeRatings)) }
+                    )
+                }
+
                 item(key = "tmdb_episodes") {
                     SettingsToggleRow(
                         title = stringResource(R.string.tmdb_episodes_title),

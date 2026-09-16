@@ -58,10 +58,10 @@ func (b *SegmentCacheBudget) Reserve(n int64) bool {
 	}
 	for {
 		c := b.current.Load()
-		if c+n <= b.maxBytes && b.current.CompareAndSwap(c, c+n) {
+		if n <= b.maxBytes-c && b.current.CompareAndSwap(c, c+n) {
 			return true
 		}
-		if c+n > b.maxBytes {
+		if n > b.maxBytes-c {
 			return false
 		}
 	}
@@ -78,8 +78,7 @@ func (b *SegmentCacheBudget) Release(n int64) {
 type SegmentCache interface {
 	Get(messageID string) (SegmentData, bool)
 	Set(messageID string, data SegmentData)
-	// Purge drops all cached entries and resets the budget counter to zero.
-	// Call this when no sessions are active so the GC can reclaim the memory.
+	// Purge drops this cache's entries and releases only its share of the budget.
 	Purge()
 }
 
@@ -147,23 +146,29 @@ func (c *memorySegmentCache) Set(messageID string, data SegmentData) {
 	defer c.mu.Unlock()
 
 	size := int64(len(data.Body))
+	// An uncacheable article must not flush useful seek/read-ahead data.
+	if c.budget != nil && size > c.budget.MaxBytes() {
+		return
+	}
 
 	if el, ok := c.m[messageID]; ok {
 		oldSize := int64(len(el.Value.(*cacheEntry).data.Body))
 		if c.budget != nil {
-			c.budget.Release(oldSize)
-			reserved := c.budget.Reserve(size)
-			if !reserved {
-				// If we can't reserve new size, evict and try again
-				c.lru.MoveToFront(el)
-				c.evictLocked()
-				for c.lru.Len() > 0 && !reserved {
-					c.evictLocked()
-					reserved = c.budget.Reserve(size)
+			// Keep the old entry accounted for until a replacement is secured.
+			// Releasing it first let eviction release it twice and detach el.
+			delta := size - oldSize
+			for delta > 0 && !c.budget.Reserve(delta) {
+				victim := c.lru.Back()
+				if victim == el {
+					victim = victim.Prev()
 				}
-				if !reserved {
-					return // cannot cache
+				if victim == nil {
+					return // another cache owns the remaining budget; retain the old value
 				}
+				c.removeLocked(victim)
+			}
+			if delta < 0 {
+				c.budget.Release(-delta)
 			}
 		}
 		c.lru.MoveToFront(el)
@@ -195,7 +200,10 @@ func (c *memorySegmentCache) Set(messageID string, data SegmentData) {
 }
 
 func (c *memorySegmentCache) evictLocked() {
-	el := c.lru.Back()
+	c.removeLocked(c.lru.Back())
+}
+
+func (c *memorySegmentCache) removeLocked(el *list.Element) {
 	if el == nil {
 		return
 	}
@@ -207,7 +215,7 @@ func (c *memorySegmentCache) evictLocked() {
 	c.lru.Remove(el)
 }
 
-// Purge drops all cached entries and resets the budget to zero.
+// Purge drops this cache's entries without releasing another session's budget.
 func (c *memorySegmentCache) Purge() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

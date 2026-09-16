@@ -51,6 +51,25 @@ import java.util.concurrent.atomic.AtomicInteger
 class TmdbMetadataServiceTest {
 
     @Test
+    fun recommendationPageUsesResponseArtworkWithoutExtraRequests() = runTest {
+        val api = mockk<TmdbApi>()
+        coEvery { api.getMovieRecommendations(any(), any(), any(), 2) } returns Response.success(
+            com.nuvio.tv.data.remote.api.TmdbRecommendationsResponse(
+                page = 2, totalPages = 2,
+                results = listOf(com.nuvio.tv.data.remote.api.TmdbRecommendationResult(
+                    id = 42, title = "Example", backdropPath = "/backdrop.jpg"
+                ))
+            )
+        )
+        val result = TmdbMetadataService(api).fetchRecommendationPage("10", ContentType.MOVIE, "en", 2)
+        assertTrue(result.endReached)
+        assertEquals("tmdb:42", result.items.single().id)
+        assertEquals("https://image.tmdb.org/t/p/w780/backdrop.jpg", result.items.single().poster)
+        coVerify(exactly = 0) { api.getMovieImages(any(), any(), any()) }
+        coVerify(exactly = 0) { api.getMovieDetails(any(), any(), any()) }
+    }
+
+    @Test
     fun `fetchEnrichment maps tmdb ids onto production and network companies`() = runTest {
         val api = mockk<TmdbApi>()
         coEvery { api.getMovieDetails(any(), any(), any()) } returns Response.success(

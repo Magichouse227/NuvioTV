@@ -527,6 +527,11 @@ internal fun PlaybackSettingsSections(
                 )
             }
 
+            item(key = "enhanced_random_playback") { EnhancedPlaybackSettingsRow() }
+            item(key = "nntp_setup_help") {
+                NntpSetupHelpRow(onFocused = { focusedSection = PlaybackSection.STREAM_SELECTION })
+            }
+
             autoPlaySettingsItems(
                 playerSettings = playerSettings,
                 onShowModeDialog = onShowStreamAutoPlayModeDialog,

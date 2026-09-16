@@ -183,9 +183,13 @@ class NntpService @Inject constructor(
                 synchronized(lifecycleLock) { cleanupJob }
             }
 
-            require(nzbUrl.isNotBlank()) { "NZB URL is blank" }
-            require(servers.isNotEmpty()) { "NNTP servers are missing" }
-            servers.forEach(NntpServerConfig::parse)
+            require(nzbUrl.isNotBlank()) { "The addon did not provide an NZB link. Try another source." }
+            try {
+                require(servers.isNotEmpty())
+                servers.forEach(NntpServerConfig::parse)
+            } catch (error: IllegalArgumentException) {
+                throw NntpException(NntpErrorMessages.PROVIDER_SETUP)
+            }
             publishConnecting(start.generation)
             DiagnosticLog.record("nntp", "event=session_start providers=${servers.size}")
 

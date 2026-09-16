@@ -350,7 +350,10 @@ data class TmdbDetailsResponse(
     @Json(name = "poster_path") val posterPath: String? = null,
     @Json(name = "last_air_date") val lastAirDate: String? = null,
     @Json(name = "status") val status: String? = null,
-    @Json(name = "belongs_to_collection") val belongsToCollection: TmdbCollectionSummary? = null
+    @Json(name = "belongs_to_collection") val belongsToCollection: TmdbCollectionSummary? = null,
+    @Json(name = "budget") val budget: Long? = null,
+    @Json(name = "revenue") val revenue: Long? = null,
+    @Json(name = "next_episode_to_air") val nextEpisodeToAir: TmdbEpisode? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -500,15 +503,19 @@ data class TmdbSeasonResponse(
 @JsonClass(generateAdapter = true)
 data class TmdbEpisode(
     @Json(name = "episode_number") val episodeNumber: Int? = null,
+    @Json(name = "season_number") val seasonNumber: Int? = null,
     @Json(name = "name") val name: String? = null,
     @Json(name = "overview") val overview: String? = null,
     @Json(name = "still_path") val stillPath: String? = null,
     @Json(name = "air_date") val airDate: String? = null,
-    @Json(name = "runtime") val runtime: Int? = null
+    @Json(name = "runtime") val runtime: Int? = null,
+    @Json(name = "vote_average") val voteAverage: Double? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class TmdbRecommendationsResponse(
+    @Json(name = "page") val page: Int = 1,
+    @Json(name = "total_pages") val totalPages: Int = 1,
     @Json(name = "results") val results: List<TmdbRecommendationResult>? = null
 )
 

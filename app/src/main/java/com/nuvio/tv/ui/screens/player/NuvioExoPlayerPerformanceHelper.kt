@@ -1,5 +1,6 @@
 package com.nuvio.tv.ui.screens.player
 
+import com.nuvio.tv.core.performance.DevicePerformance
 import android.content.Context
 import androidx.media3.common.C
 import androidx.media3.common.NuvioEngineConfig
@@ -110,6 +111,7 @@ object NuvioExoPlayerPerformanceHelper {
             safeLimitMb
         }
 
+        targetBufferSizeMb = targetBufferSizeMb.coerceAtMost(DevicePerformance.policy.playerBufferMb)
         val effectiveBufferMb = when {
             settings.nuvioPerformanceModeEnabled -> {
                 if (customBuffers && !settings.bufferBudgetManaged) {
@@ -125,14 +127,14 @@ object NuvioExoPlayerPerformanceHelper {
             else -> MemoryBudget.defaultBufferSizeMb
         }
         calculatedMemoryUsageMb = MemoryBudget.totalUsageMb(
-            effectiveBufferMb,
+            effectiveBufferMb.coerceAtMost(DevicePerformance.policy.playerBufferMb),
             settings.parallelConnectionCount,
             Math.ceil(settings.parallelChunkSizeKb / 1024.0).toInt(),
-            settings.useParallelConnections && settings.parallelNetworkEnabled
+            !DevicePerformance.lightweight && settings.useParallelConnections && settings.parallelNetworkEnabled
         )
 
         val oldPoolSize = connectionPoolSize
-        val customNetwork = settings.parallelNetworkEnabled
+        val customNetwork = settings.parallelNetworkEnabled && !DevicePerformance.lightweight
         connectionPoolSize = if (customNetwork && settings.useParallelConnections) {
             settings.parallelConnectionCount * 2
         } else {
@@ -283,6 +285,7 @@ object NuvioExoPlayerPerformanceHelper {
         return if (enabled) {
             val effectiveTargetBufferMb = (targetBufferSizeMb - chunkOverheadMb)
                 .coerceAtLeast(MemoryBudget.MIN_BUFFER_MB)
+                .coerceAtMost(DevicePerformance.policy.playerBufferMb)
             val targetBufferBytes = (effectiveTargetBufferMb.toLong() * 1024L * 1024L)
                 .coerceAtMost(Int.MAX_VALUE.toLong())
                 .toInt()
@@ -303,7 +306,7 @@ object NuvioExoPlayerPerformanceHelper {
                 .build()
         } else {
             DefaultLoadControl.Builder()
-                .setTargetBufferBytes(100 * 1024 * 1024)
+                .setTargetBufferBytes((if (DevicePerformance.lightweight) 32 else 100) * 1024 * 1024)
                 .setBufferDurationsMs(
                     DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
                     70_000,

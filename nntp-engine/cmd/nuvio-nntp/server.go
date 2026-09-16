@@ -40,6 +40,7 @@ type sessionStats struct {
 
 type errorResponse struct {
 	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
 }
 
 type rateLimitErrorResponse struct {
@@ -111,7 +112,9 @@ func (s *apiServer) handleSessions(w http.ResponseWriter, request *http.Request)
 
 	session, err := s.registry.createContext(request.Context(), payload)
 	if err != nil {
-		logger.Warn("Failed to create NNTP session", "err", err)
+		publicError := publicSessionError(err)
+		// Provider responses and NZB URLs can contain secrets. Log only a stable code.
+		logger.Warn("Failed to create NNTP session", "code", publicError.Code)
 		var rateLimitErr *nzbRateLimitError
 		if errors.As(err, &rateLimitErr) {
 			writeJSON(w, http.StatusTooManyRequests, rateLimitErrorResponse{
@@ -131,7 +134,7 @@ func (s *apiServer) handleSessions(w http.ResponseWriter, request *http.Request)
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeJSON(w, http.StatusBadRequest, publicError)
 		return
 	}
 	writeJSON(w, http.StatusCreated, createSessionResponse{

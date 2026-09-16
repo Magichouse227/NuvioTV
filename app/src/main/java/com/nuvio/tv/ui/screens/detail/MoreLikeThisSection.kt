@@ -21,6 +21,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.foundation.focusGroup
 import androidx.compose.ui.text.style.TextOverflow
@@ -29,6 +30,8 @@ import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.nuvio.tv.domain.model.MetaPreview
+import com.nuvio.tv.domain.model.Meta
+import androidx.tv.material3.Button
 import com.nuvio.tv.ui.components.GridContentCard
 import com.nuvio.tv.ui.components.PosterCardStyle
 
@@ -36,6 +39,8 @@ import com.nuvio.tv.ui.components.PosterCardStyle
 @Composable
 fun MoreLikeThisSection(
     items: List<MetaPreview>,
+    meta: Meta? = null,
+    source: MoreLikeThisSource? = null,
     sourceLabel: String? = null,
     posterCardCornerRadius: Dp = NuvioTheme.spacing.md,
     upFocusRequester: FocusRequester? = null,
@@ -52,6 +57,8 @@ fun MoreLikeThisSection(
     if (items.isEmpty()) return
 
     val firstItemFocusRequester = remember { FocusRequester() }
+    val viewAllFocusRequester = remember { FocusRequester() }
+    var showAll by remember(meta?.id) { mutableStateOf(false) }
     val restoreFocusRequester = remember { FocusRequester() }
     val itemFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
 
@@ -90,6 +97,17 @@ fun MoreLikeThisSection(
             .fillMaxWidth()
             .padding(top = NuvioTheme.spacing.sm, bottom = NuvioTheme.spacing.sm)
     ) {
+        if (meta != null && source != null) {
+            Button(
+                onClick = { showAll = true },
+                modifier = Modifier.padding(start = NuvioTheme.spacing.xxxl, bottom = 10.dp)
+                    .focusRequester(viewAllFocusRequester)
+                    .focusProperties {
+                        upFocusRequester?.let { up = it }
+                        down = firstItemFocusRequester
+                    }
+            ) { Text("View all") }
+        }
         LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
@@ -121,7 +139,7 @@ fun MoreLikeThisSection(
                         imageCrossfade = true,
                         isWatched = isItemWatched(item),
                         focusRequester = focusRequester,
-                        upFocusRequester = upFocusRequester,
+                        upFocusRequester = if (meta != null && source != null) viewAllFocusRequester else upFocusRequester,
                         downFocusRequester = downFocusRequester,
                         onFocused = {
                             onItemFocused(item)
@@ -162,5 +180,8 @@ fun MoreLikeThisSection(
                         .padding(end = 10.dp, top = NuvioTheme.spacing.xxs, bottom = NuvioTheme.spacing.xxs)
                 )
             }
+    }
+    if (showAll && meta != null && source != null) {
+        RecommendationsDialog(meta, source, onDismiss = { showAll = false }, onItemClick = onItemClick)
     }
 }

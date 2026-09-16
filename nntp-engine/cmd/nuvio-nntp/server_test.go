@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,29 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSessionSetupResponseDoesNotExposeProviderCredentials(t *testing.T) {
+	registry := newSessionRegistry(1, time.Minute)
+	defer registry.closeAll()
+	registry.newSession = func(context.Context, createSessionRequest) (*engineSession, error) {
+		return nil, setupFailure("provider_connection", errors.New("private-user:private-password?apikey=private-key"))
+	}
+	api := newAPIServer(registry, "http://127.0.0.1:8191", "test-management-token-at-least-32-bytes")
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader("{}"))
+	request.Header.Set(managementTokenHeader, "test-management-token-at-least-32-bytes")
+	response := httptest.NewRecorder()
+	api.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var payload errorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "provider_connection" || strings.Contains(response.Body.String(), "private-") {
+		t.Fatalf("unsafe or unclassified response: %s", response.Body.String())
+	}
+}
 
 func TestHealthIsLoopbackAPIReady(t *testing.T) {
 	registry := newSessionRegistry(1, time.Minute)

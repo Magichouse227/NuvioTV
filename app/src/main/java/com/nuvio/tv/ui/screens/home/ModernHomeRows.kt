@@ -537,7 +537,7 @@ internal fun ModernRowSection(
             text = rowTitle,
             style = rowTitleStyle,
             color = textColor,
-            modifier = textModifier
+            modifier = textModifier.catalogAccent()
         )
 
         val rowListState = rowListStates.getOrPut(row.key) {
@@ -1526,3 +1526,4 @@ private fun isSelectKey(keyCode: Int): Boolean {
         keyCode == AndroidKeyEvent.KEYCODE_ENTER ||
         keyCode == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER
 }
+

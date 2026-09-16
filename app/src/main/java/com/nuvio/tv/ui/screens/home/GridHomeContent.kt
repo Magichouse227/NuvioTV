@@ -346,7 +346,7 @@ fun GridHomeContent(
         return
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(NuvioTheme.colors.Background)) {
+    Box(modifier = Modifier.fillMaxSize().homeBackground()) {
         val contentFocusRequester = LocalContentFocusRequester.current
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val gridWidth = maxWidth
@@ -845,6 +845,7 @@ private fun SectionDivider(
     ) {
         Text(
             text = catalogName,
+            modifier = Modifier.catalogAccent(),
             style = MaterialTheme.typography.headlineMedium,
             color = NuvioTheme.colors.TextPrimary
         )

@@ -103,7 +103,9 @@ class NntpEngineApi @Inject constructor(
             try {
                 call.enqueue(object : Callback {
                     override fun onFailure(call: okhttp3.Call, error: IOException) {
-                        continuation.resumeWith(Result.failure(error))
+                        continuation.resumeWith(
+                            Result.failure(NntpException(NntpErrorMessages.transport(error), error))
+                        )
                     }
 
                     override fun onResponse(call: okhttp3.Call, response: Response) {
@@ -138,7 +140,7 @@ class NntpEngineApi @Inject constructor(
                                     continuation.resumeWith(
                                         Result.failure(
                                             NntpException(
-                                                "NNTP engine request failed (HTTP ${response.code})"
+                                                NntpErrorMessages.response(response.code, responseText)
                                             )
                                         )
                                     )
@@ -146,7 +148,7 @@ class NntpEngineApi @Inject constructor(
                                 }
                                 val json = JSONObject(responseText)
                                 val id = json.optString("id")
-                            if (!SESSION_ID_PATTERN.matches(id) || id != requestedSessionId) {
+                                if (!SESSION_ID_PATTERN.matches(id) || id != requestedSessionId) {
                                     throw NntpException("NNTP engine returned an invalid session")
                                 }
                                 val streamUrl = json.optString("streamUrl")

@@ -473,6 +473,8 @@ class TmdbMetadataService(
                     releaseInfo = releaseInfo,
                     rating = rating,
                     runtimeMinutes = runtime,
+                    budget = details?.budget?.takeIf { it > 0 },
+                    revenue = details?.revenue?.takeIf { it > 0 },
                     director = exposedDirector,
                     writer = exposedWriter,
                     productionCompanies = productionCompanies,
@@ -657,6 +659,15 @@ class TmdbMetadataService(
         language: String = "en",
         maxItems: Int = 12
     ): List<MetaPreview> = withContext(ioDispatcher) {
+        if (com.nuvio.tv.core.performance.DevicePerformance.lightweight) {
+            return@withContext try {
+                fetchRecommendationPage(tmdbId, contentType, language, 1).items.take(maxItems.coerceAtLeast(1))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
         val normalizedLanguage = normalizeTmdbLanguage(language)
         val itemLimit = maxItems.coerceAtLeast(1)
         val cacheKey = "$tmdbId:${contentType.name}:$normalizedLanguage:more_like:$itemLimit"
@@ -774,6 +785,43 @@ class TmdbMetadataService(
             Log.w(TAG, "Failed to fetch recommendations for $tmdbId: ${e.message}")
             emptyList()
         }
+    }
+
+    /** One request per page; artwork paths are already included in recommendation responses. */
+    suspend fun fetchRecommendationPage(
+        tmdbId: String,
+        contentType: ContentType,
+        language: String = "en",
+        page: Int = 1
+    ): TmdbRecommendationPage = withContext(ioDispatcher) {
+        require(page in 1..500)
+        val numericId = tmdbId.toIntOrNull() ?: return@withContext TmdbRecommendationPage(emptyList(), true)
+        val tv = contentType in listOf(ContentType.SERIES, ContentType.TV)
+        val response = if (tv) tmdbApi.getTvRecommendations(numericId, TMDB_API_KEY, normalizeTmdbLanguage(language), page)
+            else tmdbApi.getMovieRecommendations(numericId, TMDB_API_KEY, normalizeTmdbLanguage(language), page)
+        if (!response.isSuccessful) throw retrofit2.HttpException(response)
+        val body = response.body() ?: throw java.io.IOException("Empty recommendations response")
+        val items = body.results.orEmpty().mapNotNull { rec ->
+            if (rec.id <= 0) return@mapNotNull null
+            val title = (rec.title ?: rec.name ?: rec.originalTitle ?: rec.originalName)?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+            val type = when (rec.mediaType) {
+                "movie" -> ContentType.MOVIE
+                "tv" -> ContentType.SERIES
+                else -> if (tv) ContentType.SERIES else ContentType.MOVIE
+            }
+            val backdrop = buildImageUrl(rec.backdropPath, size = "w780")
+            val poster = buildImageUrl(rec.posterPath, size = "w500")
+            MetaPreview(
+                id = "tmdb:${rec.id}", type = type, name = title,
+                poster = backdrop ?: poster, posterShape = PosterShape.LANDSCAPE,
+                background = backdrop, logo = null, description = null,
+                releaseInfo = (rec.releaseDate ?: rec.firstAirDate)?.take(4),
+                imdbRating = rec.voteAverage?.toFloat(), genres = emptyList(),
+                landscapePoster = backdrop, rawPosterUrl = poster
+            )
+        }
+        TmdbRecommendationPage(items, page >= body.totalPages || body.results.isNullOrEmpty() || page == 500)
     }
 
     private val collectionCache = ConcurrentHashMap<String, TmdbMovieCollection>()
@@ -1635,6 +1683,8 @@ private fun selectTvAgeRating(
         .firstOrNull { it.isNotBlank() }
 }
 
+data class TmdbRecommendationPage(val items: List<MetaPreview>, val endReached: Boolean)
+
 data class TmdbMovieCollection(
     val name: String?,
     val items: List<MetaPreview>
@@ -1665,7 +1715,9 @@ data class TmdbEnrichment(
     val collectionName: String?,
     val originalTitle: String? = null,
     val alternativeTitles: List<String> = emptyList(),
-    val trailers: List<MetaTrailer> = emptyList()
+    val trailers: List<MetaTrailer> = emptyList(),
+    val budget: Long? = null,
+    val revenue: Long? = null
 )
 
 data class TmdbEpisodeEnrichment(
@@ -1673,7 +1725,8 @@ data class TmdbEpisodeEnrichment(
     val overview: String?,
     val thumbnail: String?,
     val airDate: String?,
-    val runtimeMinutes: Int?
+    val runtimeMinutes: Int?,
+    val rating: Double? = null
 )
 
 enum class TmdbEntityKind(val routeValue: String) {
@@ -1738,7 +1791,8 @@ private fun TmdbEpisode.toEnrichment(): TmdbEpisodeEnrichment {
         overview = overview,
         thumbnail = thumbnail,
         airDate = airDate,
-        runtimeMinutes = runtime
+        runtimeMinutes = runtime,
+        rating = voteAverage?.takeIf { it > 0 && it <= 10 }
     )
 }
 

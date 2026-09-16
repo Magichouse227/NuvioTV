@@ -68,6 +68,7 @@ import com.nuvio.tv.domain.model.NextToWatch
 import com.nuvio.tv.ui.components.ImdbRatingSourceLabel
 import com.nuvio.tv.ui.components.MDBListRatingsRow
 import com.nuvio.tv.ui.components.SynopsisDescription
+import androidx.compose.material.icons.filled.Shuffle
 import com.nuvio.tv.ui.theme.NuvioTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -90,6 +91,7 @@ fun HeroContentSection(
     nextEpisode: Video?,
     nextToWatch: NextToWatch?,
     onPlayClick: () -> Unit,
+    onRandomEpisodeClick: (() -> Unit)? = null,
     isPlayEnabled: Boolean = true,
     onPlayLongPress: (() -> Unit)? = null,
     isInLibrary: Boolean,
@@ -263,6 +265,16 @@ fun HeroContentSection(
                             onLongPress = onLibraryLongPress,
                             onFocused = onHeroActionFocused
                         )
+
+                        if (onRandomEpisodeClick != null) {
+                            ActionIconButton(
+                                icon = Icons.Default.Shuffle,
+                                contentDescription = "Play a random episode",
+                                onClick = onRandomEpisodeClick,
+                                enabled = isPlayEnabled,
+                                onFocused = onHeroActionFocused
+                            )
+                        }
 
                         if (meta.apiType == "movie") {
                             ActionIconButton(
@@ -730,6 +742,18 @@ private fun MetaInfoRow(
                     )
                 }
             }
+        }
+
+        if (meta.type == ContentType.MOVIE && (meta.budget != null || meta.revenue != null)) {
+            val money = remember { java.text.NumberFormat.getCurrencyInstance(java.util.Locale.US).apply { maximumFractionDigits = 0 } }
+            Text(
+                text = listOfNotNull(
+                    meta.budget?.takeIf { it > 0 }?.let { "Budget: " + money.format(it) },
+                    meta.revenue?.takeIf { it > 0 }?.let { "Revenue: " + money.format(it) }
+                ).joinToString("  •  "),
+                style = MaterialTheme.typography.labelMedium,
+                color = NuvioTheme.colors.TextSecondary
+            )
         }
 
         // Secondary row: Runtime, Age Rating, Status, Country, Language

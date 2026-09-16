@@ -43,6 +43,7 @@ class TmdbSettingsDataStore @Inject constructor(
     private val useCreditsKey = booleanPreferencesKey("tmdb_use_credits")
     private val useProductionsKey = booleanPreferencesKey("tmdb_use_productions")
     private val useNetworksKey = booleanPreferencesKey("tmdb_use_networks")
+    private val useEpisodeRatingsKey = booleanPreferencesKey("tmdb_use_episode_ratings")
     private val useEpisodesKey = booleanPreferencesKey("tmdb_use_episodes")
     private val useTrailersKey = booleanPreferencesKey("tmdb_use_trailers")
     private val useMoreLikeThisKey = booleanPreferencesKey("tmdb_use_more_like_this")
@@ -63,6 +64,7 @@ class TmdbSettingsDataStore @Inject constructor(
                 useProductions = prefs[useProductionsKey] ?: true,
                 useNetworks = prefs[useNetworksKey] ?: true,
                 useEpisodes = prefs[useEpisodesKey] ?: true,
+                useEpisodeRatings = prefs[useEpisodeRatingsKey] ?: true,
                 useTrailers = prefs[useTrailersKey] ?: true,
                 useMoreLikeThis = prefs[useMoreLikeThisKey] ?: true,
                 useCollections = prefs[useCollectionsKey] ?: true
@@ -112,6 +114,10 @@ class TmdbSettingsDataStore @Inject constructor(
 
     suspend fun setUseNetworks(enabled: Boolean) {
         store().edit { it[useNetworksKey] = enabled }
+    }
+
+    suspend fun setUseEpisodeRatings(enabled: Boolean) {
+        store().edit { it[useEpisodeRatingsKey] = enabled }
     }
 
     suspend fun setUseEpisodes(enabled: Boolean) {

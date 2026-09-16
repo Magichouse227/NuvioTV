@@ -1,5 +1,6 @@
 package com.nuvio.tv
 
+import com.nuvio.tv.core.performance.DevicePerformance
 import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
@@ -22,7 +23,6 @@ import com.nuvio.tv.core.diagnostics.SentryInitializer
 import com.nuvio.tv.core.diagnostics.CrashReportStore
 import com.nuvio.tv.core.diagnostics.DiagnosticLog
 import com.nuvio.tv.core.diagnostics.DiagnosticReportStore
-import com.nuvio.tv.core.build.LowRamDevicePolicy
 import com.nuvio.tv.core.image.StaleWhileRevalidateCacheStrategy
 import com.nuvio.tv.core.runtime.PluginRuntimeHooks
 import com.nuvio.tv.core.startup.StartupTimingMarkers
@@ -100,6 +100,7 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
             diagnosticReportStore.initialize()
             DiagnosticLog.record("app", "Application process started")
         }
+        DevicePerformance.initialize(this)
         SentryInitializer.start(this, sentrySettingsDataStore)
         // Install last so this wrapper also preserves Sentry's handler when enabled.
         crashReportStore.installUncaughtExceptionHandler()
@@ -115,11 +116,12 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {
-        val lowRamDevice = LowRamDevicePolicy.isLowRam(context)
+        DevicePerformance.initialize(context)
+        val policy = DevicePerformance.policy
         val imageOkHttpClient by lazy {
             val imageDispatcher = okhttp3.Dispatcher().apply {
-                maxRequests = if (lowRamDevice) 8 else 32
-                maxRequestsPerHost = if (lowRamDevice) 4 else 16
+                maxRequests = policy.imageRequests
+                maxRequestsPerHost = policy.imageRequestsPerHost
             }
             OkHttpClient.Builder()
                 .dispatcher(imageDispatcher)
@@ -145,10 +147,10 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
 
         return ImageLoader.Builder(this)
             .components {
-                if (Build.VERSION.SDK_INT >= 28) {
-                    add(AnimatedImageDecoder.Factory())
-                } else {
-                    add(GifDecoder.Factory())
+                // On 1 GB sticks display still artwork without running animated decoders.
+                if (!policy.lightweight) {
+                    if (Build.VERSION.SDK_INT >= 28) add(AnimatedImageDecoder.Factory())
+                    else add(GifDecoder.Factory())
                 }
                 add(SvgDecoder.Factory())
                 add(
@@ -179,20 +181,20 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
                     else -> 0.25
                 }
                 MemoryCache.Builder()
-                    .maxSizePercent(context, cachePercent)
+                    .maxSizeBytes(minOf((Runtime.getRuntime().maxMemory() * cachePercent).toLong(), policy.imageCacheBytes))
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache").toOkioPath())
-                    .maxSizeBytes(200L * 1024 * 1024)
+                    .maxSizeBytes(policy.imageDiskCacheBytes)
                     .build()
             }
             .crossfade(false)
             .precision(coil3.size.Precision.INEXACT)
             .allowHardware(false)
             .allowRgb565(imagePerformancePreferences.rgb565Enabled)
-            .bitmapFactoryMaxParallelism(if (lowRamDevice) 1 else 4)
+            .bitmapFactoryMaxParallelism(policy.imageDecoders)
             .build()
     }
 }

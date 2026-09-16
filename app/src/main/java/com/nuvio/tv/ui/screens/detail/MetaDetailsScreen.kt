@@ -301,6 +301,7 @@ fun MetaDetailsScreen(
 ) {
     val playbackAvailability = LocalPlaybackAvailability.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val enhancedSettings by viewModel.enhancedSettings.collectAsStateWithLifecycle(initialValue = com.nuvio.tv.data.local.EnhancedSettings())
     val posterCardCornerRadiusDp by viewModel.posterCardCornerRadiusDp.collectAsStateWithLifecycle()
     val effectiveAutoplayEnabled by viewModel.effectiveAutoplayEnabled.collectAsStateWithLifecycle(
         initialValue = false
@@ -718,6 +719,7 @@ fun MetaDetailsScreen(
                     commentsEpisodeTarget = uiState.commentsEpisodeTarget,
                     selectedComment = uiState.selectedComment,
                     onSeasonSelected = { viewModel.onEvent(MetaDetailsEvent.OnSeasonSelected(it)) },
+                    includeWatchedInRandom = enhancedSettings.includeWatchedInRandom,
                     onEpisodeClick = playEpisode,
                     onEpisodeManualPlayClick = playEpisodeManually,
                     onPlayClick = playTitle,
@@ -1037,6 +1039,7 @@ private fun MetaDetailsContent(
     commentsEpisodeTarget: Video?,
     selectedComment: TraktCommentReview?,
     onSeasonSelected: (Int) -> Unit,
+    includeWatchedInRandom: Boolean = false,
     onEpisodeClick: (Video) -> Unit,
     onEpisodeManualPlayClick: (Video) -> Unit,
     onEpisodeStartFromBeginningClick: (Video) -> Unit = {},
@@ -1573,6 +1576,7 @@ private fun MetaDetailsContent(
     }
 
     // Backdrop alpha for crossfade
+    val randomPlaybackContext = LocalContext.current
     val backgroundColor = NuvioTheme.colors.Background
 
     // Pre-compute gradient brushes once
@@ -1825,6 +1829,14 @@ private fun MetaDetailsContent(
                         nextEpisode = nextEpisode,
                         nextToWatch = nextToWatch,
                         onPlayClick = heroPlayClick,
+                        onRandomEpisodeClick = if (isTvShow) ({
+                            val completed = watchedEpisodes + episodeProgressMap.filterValues { it.isCompleted() }.keys
+                            val selected = RandomEpisodePolicy.choose(
+                                meta.watchableEpisodes().filter(canPlayEpisode), completed, includeWatchedInRandom
+                            )
+                            if (selected != null) episodeClick(selected)
+                            else Toast.makeText(randomPlaybackContext, "No available episodes match your random playback settings.", Toast.LENGTH_SHORT).show()
+                        }) else null,
                         isPlayEnabled = isPlayEnabled,
                         onPlayLongPress = if (isPlayEnabled && (showManualPlayOption || nextToWatch?.isResume == true)) {
                             { showHeroPlayOptionsDialog = true }
@@ -1895,6 +1907,7 @@ private fun MetaDetailsContent(
                             episodes = episodesForSeason,
                             episodeProgressMap = episodeProgressMap,
                             episodeRatings = visibleEpisodeImdbRatings,
+                            ratingVisibility = detailImdbRatingsVisibility,
                             watchedEpisodes = watchedEpisodes,
                             episodeWatchedPendingKeys = episodeWatchedPendingKeys,
                             blurUnwatchedEpisodes = blurUnwatchedEpisodes,
@@ -2016,6 +2029,8 @@ private fun MetaDetailsContent(
                             PeopleSectionTab.MORE_LIKE_THIS -> {
                                 MoreLikeThisSection(
                                     items = moreLikeThis,
+                                    meta = meta,
+                                    source = moreLikeThisSource,
                                     sourceLabel = moreLikeThisSourceLabel,
                                     posterCardCornerRadius = posterCardCornerRadiusDp.dp,
                                     upFocusRequester = if (hasVisiblePeopleTabs) moreLikeTabFocusRequester else seasonDownFocusRequester ?: heroPlayFocusRequester,

@@ -49,7 +49,7 @@ $stageRoot = Join-Path ([IO.Path]::GetTempPath()) ("nuvio-nntp-" + [Guid]::NewGu
 try {
     # Keep the loader, archive/unpack integrity checks, and Android command
     # entry point as a precondition for replacing any packaged binary.
-    & $GoCommand test ./pkg/media/loader ./pkg/media/unpack ./cmd/nuvio-nntp
+    & $GoCommand test ./pkg/usenet/pool ./pkg/media/loader ./pkg/media/unpack ./cmd/nuvio-nntp
     if ($LASTEXITCODE -ne 0) {
         throw "Focused NNTP integrity tests failed."
     }

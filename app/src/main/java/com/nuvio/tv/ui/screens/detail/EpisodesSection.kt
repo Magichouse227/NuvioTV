@@ -267,6 +267,7 @@ fun EpisodesRow(
     episodes: List<Video>,
     episodeProgressMap: Map<Pair<Int, Int>, com.nuvio.tv.domain.model.WatchProgress> = emptyMap(),
     episodeRatings: Map<Pair<Int, Int>, Double> = emptyMap(),
+    ratingVisibility: com.nuvio.tv.domain.model.DetailImdbRatingsVisibility = com.nuvio.tv.domain.model.DetailImdbRatingsVisibility.SHOW_ALL,
     watchedEpisodes: Set<Pair<Int, Int>> = emptySet(),
     episodeWatchedPendingKeys: Set<String> = emptySet(),
     blurUnwatchedEpisodes: Boolean = false,
@@ -399,6 +400,7 @@ fun EpisodesRow(
                 episode = episode,
                 watchProgress = progress,
                 imdbRating = imdbRating,
+                tmdbRating = episode.tmdbRating.takeIf { ratingVisibility.showEpisodeRating(progress?.isCompleted() == true || isMarkedWatched) },
                 isMarkedWatched = isMarkedWatched,
                 blurUnwatched = blurUnwatchedEpisodes,
                 suppressMarquee = isOverlayOpen,
@@ -492,6 +494,7 @@ private fun EpisodeCard(
     episode: Video,
     watchProgress: com.nuvio.tv.domain.model.WatchProgress? = null,
     imdbRating: Double? = null,
+    tmdbRating: Double? = null,
     isMarkedWatched: Boolean = false,
     blurUnwatched: Boolean = false,
     suppressMarquee: Boolean = false,
@@ -514,8 +517,8 @@ private fun EpisodeCard(
     val runtimeLabel = remember(episode.runtime) {
         episode.runtime?.takeIf { it > 0 }?.let(::formatEpisodeRuntime)
     }
-    val ratingLabel = remember(imdbRating) {
-        imdbRating?.takeIf { it > 0.0 }?.let { String.format(Locale.US, "%.1f", it) }
+    val ratingLabel = remember(imdbRating, tmdbRating) {
+        (tmdbRating ?: imdbRating)?.takeIf { it > 0.0 }?.let { String.format(Locale.US, "%.1f", it) }
     }
     val description = remember(episode.overview) { episode.overview?.trim().orEmpty() }
     val isWatched = remember(watchProgress, isMarkedWatched) { watchProgress?.isCompleted() == true || isMarkedWatched }
@@ -875,7 +878,8 @@ private fun EpisodeCard(
                                 horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xs),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                ImdbRatingSourceLabel(
+                                if (tmdbRating != null) Text("TMDB", style = metaLabelStyle, color = textSecondary)
+                                else ImdbRatingSourceLabel(
                                     logoModifier = Modifier
                                         .width(cardMetrics.imdbLogoWidth)
                                         .height(cardMetrics.imdbLogoHeight),

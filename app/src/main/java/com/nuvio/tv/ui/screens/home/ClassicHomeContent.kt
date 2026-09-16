@@ -483,7 +483,7 @@ fun ClassicHomeContent(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(backgroundColor)
+            .homeBackground()
     ) {
     if (heroVisible) {
         activeHeroItem?.let { item ->

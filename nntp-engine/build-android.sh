@@ -63,7 +63,7 @@ cd -- "$script_dir"
 # Android command entry point. Run them before producing any replacement files.
 (
     unset GOOS GOARCH GOARM CGO_ENABLED CC
-    "$go_command" test ./pkg/media/loader ./pkg/media/unpack ./cmd/nuvio-nntp
+    "$go_command" test ./pkg/usenet/pool ./pkg/media/loader ./pkg/media/unpack ./cmd/nuvio-nntp
 )
 
 stage_root="$(mktemp -d "${TMPDIR:-/tmp}/nuvio-nntp.XXXXXX")"

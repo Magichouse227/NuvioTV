@@ -118,7 +118,8 @@ private enum class IntegrationSettingsSection {
     Debrid,
     Tmdb,
     MdbList,
-    AnimeSkip
+    AnimeSkip,
+    LiveTv
 }
 
 internal enum class SettingsSectionDestination {
@@ -1165,6 +1166,7 @@ private fun IntegrationSettingsContent(
     BackHandler(enabled = selectedSection != IntegrationSettingsSection.Hub) {
         onSelectSection(IntegrationSettingsSection.Hub)
     }
+    val liveTvFocusRequester = remember { FocusRequester() }
     val hubEntryFocusRequester = initialFocusRequester ?: hubFocusRequester
 
     LaunchedEffect(selectedSection, autoFocusEnabled) {
@@ -1175,6 +1177,7 @@ private fun IntegrationSettingsContent(
             IntegrationSettingsSection.Tmdb -> tmdbFocusRequester
             IntegrationSettingsSection.MdbList -> mdbListFocusRequester
             IntegrationSettingsSection.AnimeSkip -> animeSkipFocusRequester
+            IntegrationSettingsSection.LiveTv -> liveTvFocusRequester
         }
         runCatching { requester.requestFocus() }
     }
@@ -1223,6 +1226,13 @@ private fun IntegrationSettingsContent(
                                     onClick = { onSelectSection(IntegrationSettingsSection.MdbList) }
                                 )
                             }
+                            item(key = "integration_hub_live_tv") {
+                                SettingsActionRow(
+                                    title = "Live TV",
+                                    subtitle = "M3U playlists, Xtream and Stalker providers",
+                                    onClick = { onSelectSection(IntegrationSettingsSection.LiveTv) }
+                                )
+                            }
                             item(key = "integration_hub_animeskip") {
                                 SettingsActionRow(
                                     title = "Anime-Skip",
@@ -1253,6 +1263,10 @@ private fun IntegrationSettingsContent(
             MDBListSettingsContent(
                 initialFocusRequester = mdbListFocusRequester
             )
+        }
+
+        IntegrationSettingsSection.LiveTv -> {
+            com.nuvio.tv.ui.screens.livetv.LiveTvSettingsContent(initialFocusRequester = liveTvFocusRequester)
         }
 
         IntegrationSettingsSection.AnimeSkip -> {
