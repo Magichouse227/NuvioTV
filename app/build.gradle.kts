@@ -192,7 +192,6 @@ android {
     buildTypes {
         debug {
             signingConfig = signingConfigs.getByName(if (useDebugReleaseSigning) "debug" else "release")
-            if (useDebugReleaseSigning) applicationIdSuffix = ".enhanced.preview"
             isDebuggable = false
             isMinifyEnabled = false
 
@@ -335,7 +334,13 @@ android {
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
         val isPlaystore = variant.productFlavors.any { it.second == "playstore" }
-        variant.applicationId.set(if (isPlaystore) "com.nuvio.appdebug" else "com.nuviodebug.com")
+        variant.applicationId.set(
+            if (useDebugReleaseSigning) {
+                if (isPlaystore) "com.nuvio.tv.enhanced.preview.playstore" else "com.nuvio.tv.enhanced.preview"
+            } else {
+                if (isPlaystore) "com.nuvio.appdebug" else "com.nuviodebug.com"
+            }
+        )
     }
 }
 

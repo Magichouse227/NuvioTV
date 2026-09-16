@@ -38,6 +38,8 @@ jobs:
           chmod +x gradlew
       - name: Verify and build
         run: ./gradlew :app:testFullDebugUnitTest --tests 'com.nuvio.tv.ui.screens.settings.MemoryBudgetTest' --tests 'com.nuvio.tv.core.performance.*' --tests 'com.nuvio.tv.core.livetv.*' --tests 'com.nuvio.tv.ui.screens.detail.RandomEpisodePolicyTest' --tests 'com.nuvio.tv.core.tmdb.TmdbMetadataServiceTest' :app:assembleFullDebug --stacktrace
+      - name: Verify Fire TV preview package
+        run: python3 scripts/verify-enhanced-preview.py
       - name: Save preview APK and test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -45,6 +47,8 @@ jobs:
           name: enhanced-tv-fire-hd-preview
           path: |
             app/build/outputs/apk/full/debug/*armeabi-v7a*.apk
+            app/build/outputs/apk/full/debug/preview-verification.json
             app/build/reports/tests/testFullDebugUnitTest
+            app/build/test-results/testFullDebugUnitTest/*.xml
           if-no-files-found: warn
           retention-days: 14
