@@ -216,6 +216,7 @@ fun LayoutSettingsContent(
             contentPadding = PaddingValues(bottom = 18.dp),
             verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
         ) {
+            item(key = "enhanced_appearance") { EnhancedAppearanceRows() }
             item(key = "home_layout_section") {
                 CollapsibleSectionCard(
                     title = stringResource(R.string.layout_section_home),

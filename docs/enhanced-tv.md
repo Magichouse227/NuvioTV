@@ -28,12 +28,14 @@ Existing trailer preferences are retained; new profiles start with autoplay off.
 | Random episode playback | Added; watched episodes excluded by default, unavailable/future episodes excluded |
 | More Like This: paged grid | Added for TMDB and Trakt |
 | Hero trailer controls and delay | Existing TV controls; autoplay now opt-in for new profiles |
-| Audio boost, playback information, subtitle background controls | Existing TV features; final compatibility review pending |
+| Audio boost, playback information, subtitle background controls | Existing TV controls retained; real-device validation pending |
 | Custom profile image backgrounds | Existing TV feature |
-| Trakt and SIMKL code sign-in | Existing TV integrations; final compatibility review pending |
-| Dynamic home background and catalog underline | Preferences prepared; rendering integration pending |
-| Profile insights and library calendar | Pending |
-| Download network and folder controls | Pending |
+| Trakt and SIMKL code sign-in | Existing device-code integrations retained; credentials needed for end-to-end validation |
+| Dynamic home background and catalog underline | Added, opt-in per profile; samples existing artwork with bounded caching |
+| Profile insights and library calendar | Added, with bounded metadata loading |
+| Download network and folder controls | Excluded by the TV roadmap; no TV download service or queue |
+| Video quality chooser | Added for supported ExoPlayer video tracks; automatic mode preserved |
+| Pointer timeline seeking and keyboard shortcuts | Added; remote navigation retained while controls are visible |
 | iOS Metal PiP, Liquid Glass tabs, iOS background downloads/Live Activities, Skia implementation | Platform-specific; these implementations cannot run on Fire OS |
 
 ## Live TV behavior
@@ -59,7 +61,7 @@ uses a separate application ID, com.nuvio.tv.enhanced.preview, so it can coexist
 with the installed app. Service integrations requiring build-time API credentials
 are not configured in this preview.
 
-The Live TV and memory-policy revision dcbc172 passed the Android build and its
-selected JVM tests in GitHub Actions run 34886462401. Later feature revisions
-still require their own passing build. No physical Fire TV performance measurement
+Revision 2267a64 (Live TV, memory policy, discovery, insights and calendar) passed
+the Android build and selected JVM tests in GitHub Actions run 34930609874.
+The appearance and video-quality revision requires its own passing build. No physical Fire TV performance measurement
 or provider playback test has been completed.

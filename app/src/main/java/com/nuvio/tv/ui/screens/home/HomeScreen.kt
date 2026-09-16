@@ -363,6 +363,7 @@ fun HomeScreen(
                                 )
                         }
                     ) {
+                        EnhancedHomeAppearance {
                         when (uiState.homeLayout) {
                             HomeLayout.CLASSIC -> ClassicHomeRoute(
                                 viewModel = viewModel,
@@ -406,6 +407,7 @@ fun HomeScreen(
                                 isCatalogItemWatched = isCatalogItemWatched,
                                 onCatalogItemLongPress = onCatalogItemLongPress
                             )
+                        }
                         }
                     }
                 }

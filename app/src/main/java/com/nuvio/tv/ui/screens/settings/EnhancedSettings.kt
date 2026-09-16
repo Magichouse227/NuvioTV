@@ -1,5 +1,8 @@
 package com.nuvio.tv.ui.screens.settings
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -36,8 +39,10 @@ internal fun EnhancedPlaybackSettingsRow(viewModel: EnhancedSettingsViewModel = 
 @Composable
 internal fun EnhancedAppearanceRows(viewModel: EnhancedSettingsViewModel = hiltViewModel()) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
     SettingsToggleRow(title = "Dynamic background color", subtitle = "Tint the home screen using the featured artwork",
         checked = settings.dynamicBackground, onToggle = { viewModel.dynamicBackground(!settings.dynamicBackground) })
     SettingsToggleRow(title = "Catalog accent underline", subtitle = "Show an accent line below catalog headings",
         checked = settings.catalogUnderline, onToggle = { viewModel.catalogUnderline(!settings.catalogUnderline) })
+    }
 }

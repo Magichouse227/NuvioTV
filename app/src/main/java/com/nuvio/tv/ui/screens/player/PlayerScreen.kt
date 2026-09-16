@@ -5,6 +5,10 @@
 
 package com.nuvio.tv.ui.screens.player
 
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.material.icons.filled.HighQuality
+
 import com.nuvio.tv.ui.theme.NuvioMotion
 
 import com.nuvio.tv.ui.theme.NuvioTheme
@@ -180,6 +184,16 @@ fun PlayerScreen(
     var reportCodeVisible by remember { mutableStateOf(false) }
     var exitDispatched by remember { mutableStateOf(false) }
     var externalHandoffInProgress by remember { mutableStateOf(false) }
+    var showVideoQuality by remember(uiState.currentStreamUrl) { mutableStateOf(false) }
+    if (showVideoQuality) {
+        viewModel.exoPlayer?.let { player ->
+            VideoQualityDialog(player, onDismiss = {
+                showVideoQuality = false
+                if (!uiState.showControls) viewModel.onEvent(PlayerEvent.OnToggleControls)
+                viewModel.scheduleHideControls()
+            })
+        }
+    }
 
     val exitPlayer: () -> Unit = exitPlayer@{
         if (exitDispatched) return@exitPlayer
@@ -442,6 +456,7 @@ fun PlayerScreen(
     // Request focus for key events when controls visibility or panel state changes
     LaunchedEffect(
         uiState.showControls,
+        showVideoQuality,
         uiState.showEpisodesPanel,
         uiState.showSourcesPanel,
         uiState.showSubtitleStylePanel,
@@ -453,7 +468,7 @@ fun PlayerScreen(
         shouldConfirmNextEpisodeOnEnd,
         postPlayRecommendationState.isVisible,
     ) {
-        if (shouldConfirmNextEpisodeOnEnd || postPlayRecommendationState.isVisible) return@LaunchedEffect
+        if (showVideoQuality || shouldConfirmNextEpisodeOnEnd || postPlayRecommendationState.isVisible) return@LaunchedEffect
         if (uiState.error != null) return@LaunchedEffect
         if (uiState.showControls && !uiState.showEpisodesPanel && !uiState.showSourcesPanel &&
             !uiState.showAudioOverlay && !uiState.showSubtitleOverlay &&
@@ -677,7 +692,7 @@ fun PlayerScreen(
                 }
 
                 // When a side panel or dialog is open, let it handle all keys
-                val panelOrDialogOpen = uiState.showEpisodesPanel || uiState.showSourcesPanel ||
+                val panelOrDialogOpen = showVideoQuality || uiState.showEpisodesPanel || uiState.showSourcesPanel ||
                         uiState.showAudioOverlay || uiState.showSubtitleOverlay ||
                         uiState.showSubtitleStylePanel || uiState.showSpeedDialog ||
                         uiState.showSubtitleDelayOverlay || uiState.showSubtitleTimingDialog ||
@@ -687,6 +702,22 @@ fun PlayerScreen(
                         postPlayRecommendationState.isVisible ||
                         uiState.error != null
                 if (panelOrDialogOpen) return@onKeyEvent false
+
+                // A physical keyboard gets fixed ten-second seeking; the TV remote keeps its focus and scrub controls.
+                val keyboard = keyEvent.nativeKeyEvent.device?.keyboardType == android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC
+                if (keyboard && !uiState.showControls && !uiState.showPauseOverlay && !uiState.showStreamInfoOverlay) {
+                    val code = keyEvent.nativeKeyEvent.keyCode
+                    if (code == KeyEvent.KEYCODE_SPACE || code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                        if (keyEvent.nativeKeyEvent.action == KeyEvent.ACTION_DOWN) {
+                            if (code == KeyEvent.KEYCODE_SPACE) {
+                                if (keyEvent.nativeKeyEvent.repeatCount == 0) viewModel.onEvent(PlayerEvent.OnPlayPause)
+                            } else if (!viewModel.playbackTimeline.value.isLive) {
+                                viewModel.onEvent(PlayerEvent.OnSeekBy(if (code == KeyEvent.KEYCODE_DPAD_LEFT) -10_000L else 10_000L))
+                            }
+                        }
+                        return@onKeyEvent true
+                    }
+                }
 
                 if (keyEvent.nativeKeyEvent.action == KeyEvent.ACTION_UP) {
                     when (keyEvent.nativeKeyEvent.keyCode) {
@@ -1258,6 +1289,7 @@ fun PlayerScreen(
                 onSeekForward = { viewModel.onEvent(PlayerEvent.OnSeekForward) },
                 onSeekBackward = { viewModel.onEvent(PlayerEvent.OnSeekBackward) },
                 onSeekTo = { viewModel.onEvent(PlayerEvent.OnSeekTo(it)) },
+                onVideoQuality = { showVideoQuality = true },
                 onShowEpisodesPanel = { viewModel.onEvent(PlayerEvent.OnShowEpisodesPanel) },
                 onShowSourcesPanel = { viewModel.onEvent(PlayerEvent.OnShowSourcesPanel) },
                 onShowAudioDialog = { viewModel.onEvent(PlayerEvent.OnShowAudioOverlay) },
@@ -2030,6 +2062,7 @@ private fun PlayerControlsOverlay(
     onSeekForward: () -> Unit,
     onSeekBackward: () -> Unit,
     onSeekTo: (Long) -> Unit,
+    onVideoQuality: () -> Unit,
     onShowEpisodesPanel: () -> Unit,
     onShowSourcesPanel: () -> Unit,
     onShowAudioDialog: () -> Unit,
@@ -2310,6 +2343,14 @@ private fun PlayerControlsOverlay(
                             horizontalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.xs),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            if (viewModel.exoPlayer != null) ControlButton(
+                                icon = Icons.Default.HighQuality,
+                                contentDescription = "Video quality",
+                                onClick = onVideoQuality,
+                                upFocusRequester = progressUpTarget,
+                                onDownKey = onHideControls,
+                                onFocused = onResetHideTimer
+                            )
                             ControlButton(
                                 icon = Icons.Default.Speed,
                                 contentDescription = stringResource(R.string.cd_playback_speed),
@@ -2403,6 +2444,7 @@ private fun PlayerControlsProgressBarHost(
     ProgressBar(
         currentPosition = playbackTimeline.currentPosition,
         duration = playbackTimeline.duration,
+        onSeekTo = { if (!playbackTimeline.isLive) viewModel.onEvent(PlayerEvent.OnSeekTo(it)) },
         onSeekPreview = { delta ->
             viewModel.onEvent(PlayerEvent.OnPreviewSeekBy(delta))
         },
@@ -2560,6 +2602,7 @@ private fun ProgressBar(
     duration: Long,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
+    onSeekTo: (Long) -> Unit = {},
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -2589,9 +2632,16 @@ private fun ProgressBar(
     )
     var isFocused by remember { mutableStateOf(false) }
 
+    val latestSeekTo by rememberUpdatedState(onSeekTo)
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
+            .pointerInput(duration) {
+                if (duration > 0) detectTapGestures { point ->
+                    latestSeekTo((point.x / size.width.coerceAtLeast(1) * duration).toLong().coerceIn(0, duration))
+                }
+            }
             .height(if (isFocused) NuvioTheme.spacing.md else NuvioTheme.spacing.sm)
             .then(
                 if (focusRequester != null) Modifier.focusRequester(focusRequester)

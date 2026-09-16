@@ -753,6 +753,11 @@ internal fun PlayerRuntimeController.initializePlayer(
                 }
             }.apply {
                 setParameters(buildUponParameters().setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true))
+                if (isFireTvHd()) {
+                    setParameters(buildUponParameters().setMaxVideoSize(1920, 1080)
+                        .setExceedVideoConstraintsIfNecessary(false)
+                        .setExceedRendererCapabilitiesIfNecessary(false))
+                }
                 if (playerSettings.effectiveTunnelingEnabled && !safeAudioModeEnabled) {
                     setParameters(buildUponParameters().setTunnelingEnabled(true))
                 } else if (safeAudioModeEnabled) {

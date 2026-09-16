@@ -1,5 +1,7 @@
 package com.nuvio.tv.ui.screens.home
 
+import coil3.request.allowHardware
+
 import com.nuvio.tv.ui.theme.NuvioMotion
 
 import com.nuvio.tv.ui.theme.NuvioTheme
@@ -139,6 +141,8 @@ internal fun ModernHeroMediaLayer(
     val rawBackdrop by remember { derivedStateOf { heroBackdrop() } }
     val enriching by remember { derivedStateOf { enrichmentActive() } }
     var displayedBackdrop by remember { mutableStateOf(HeroBackdropState.lastDisplayedUrl ?: heroBackdrop()) }
+    val appearance = LocalHomeAppearance.current
+    val tintEnabled = appearance?.settings?.dynamicBackground == true
     if (rawBackdrop != null && rawBackdrop != displayedBackdrop && !enriching) {
         displayedBackdrop = rawBackdrop!!
     }
@@ -146,11 +150,13 @@ internal fun ModernHeroMediaLayer(
         localContext,
         displayedBackdrop,
         requestWidthPx,
-        requestHeightPx
+        requestHeightPx,
+        tintEnabled
     ) {
         displayedBackdrop?.let {
             ImageRequest.Builder(localContext)
                 .data(it)
+                .allowHardware(!tintEnabled)
                 .size(width = requestWidthPx, height = requestHeightPx)
                 .build()
         }
@@ -168,6 +174,7 @@ internal fun ModernHeroMediaLayer(
         ) { model ->
             AsyncImage(
                 model = model,
+                onSuccess = { result -> appearance?.sample(result.result.image, result.result.request.data.toString()) },
                 contentDescription = null,
                 modifier = Modifier
                     .fillMaxSize()

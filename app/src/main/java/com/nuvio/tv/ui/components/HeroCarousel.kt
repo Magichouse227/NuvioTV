@@ -1,5 +1,8 @@
 package com.nuvio.tv.ui.components
 
+import coil3.request.allowHardware
+import com.nuvio.tv.ui.screens.home.LocalHomeAppearance
+
 import com.nuvio.tv.ui.theme.NuvioTheme
 
 import android.graphics.ColorSpace
@@ -407,9 +410,12 @@ internal fun HeroCarouselBackdrop(
         with(density) { height.roundToPx() }.coerceAtLeast(1)
     }
     val backdropUrl = item.backdropUrl
-    val backgroundModel = remember(context, backdropUrl, requestWidthPx, requestHeightPx, fullPage) {
+    val appearance = LocalHomeAppearance.current
+    val tintEnabled = appearance?.settings?.dynamicBackground == true
+    val backgroundModel = remember(context, backdropUrl, requestWidthPx, requestHeightPx, fullPage, tintEnabled) {
         ImageRequest.Builder(context)
             .data(backdropUrl)
+            .allowHardware(!tintEnabled)
             .crossfade(false)
             .size(width = requestWidthPx, height = requestHeightPx)
             .apply {
@@ -487,6 +493,7 @@ internal fun HeroCarouselBackdrop(
     ) {
         AsyncImage(
             model = backgroundModel,
+            onSuccess = { result -> appearance?.sample(result.result.image, backdropUrl.orEmpty()) },
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,
