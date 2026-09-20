@@ -217,6 +217,16 @@ fun LayoutSettingsContent(
             verticalArrangement = Arrangement.spacedBy(NuvioTheme.spacing.md)
         ) {
             item(key = "enhanced_appearance") { EnhancedAppearanceRows() }
+            item(key = "top_navigation") {
+                SettingsToggleRow(
+                    title = stringResource(R.string.layout_top_navigation),
+                    subtitle = stringResource(R.string.layout_top_navigation_sub),
+                    checked = uiState.topNavigationEnabled,
+                    onToggle = {
+                        viewModel.onEvent(LayoutSettingsEvent.SetTopNavigationEnabled(!uiState.topNavigationEnabled))
+                    }
+                )
+            }
             item(key = "home_layout_section") {
                 CollapsibleSectionCard(
                     title = stringResource(R.string.layout_section_home),

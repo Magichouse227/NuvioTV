@@ -58,7 +58,7 @@ manual verification with the user's own sources.
 The Enhanced features are now integrated into `feature/native-nntp-testing`.
 The combined build retains the installed NNTP test identity
 (`com.nuviodebug.com`), permanent test signing configuration, profile/settings
-storage and fork update feed. Its version code is 1060. It does not adopt the
+storage and fork update feed. The 1.0.0 update uses version code 1062. It does not adopt the
 separate Enhanced preview package or its debug signing key.
 
 NNTP changes in this integration:
@@ -80,13 +80,47 @@ regression selections and Go pool/loader/archive/session tests before publishing
 It verifies package identity, permanent certificate, version code, embedded
 build SHA and all four freshly compiled NNTP native libraries.
 
+### Official 1.0.0 and TV interface update
+
+The combined source includes official release `1.0.0`, commit
+`9f17e8bf4abc799dc8c832d2894a8b3b166e4353`, while retaining this fork's
+signing, release workflows, updater, diagnostics, Enhanced features and NNTP engine.
+
+- Top navigation is enabled by default for each profile. It remains visible above
+  the main browsing screens and disappears on playback and full-screen detail routes.
+  Left/right selects a menu item, OK opens it, and Down returns to content. Back
+  returns to the menu after the screen's own Back handling; holding Back jumps to
+  the menu. Existing exit confirmation is preserved. Settings → Layout → Top
+  navigation restores the sidebar when disabled.
+- Profile Insights uses a profile/ avatar banner, three summary counters, six
+  overview cards and a Taste DNA panel matching the Enhanced mobile design, with
+  landscape spacing and focusable cards for a TV remote. It uses the active theme
+  accent, genre bars, movie/series balance, badges and recent history.
+- Statistics are scoped to the active profile and deduplicate watched records and
+  playback progress. Completing one episode does not complete a series. Ended
+  series require all known regular episodes; explicit whole-series marks are honored.
+- Watch time is an estimate from recorded progress and known runtimes, excluding
+  repeat watches. Missing runtimes and incomplete metadata coverage are shown.
+  Upcoming counts use announced dates, including future episodes of saved series;
+  a bare release year is not converted into an invented release day.
+- Metadata uses the existing cache first, then at most 40 title requests per visit,
+  two at a time. Closing Insights or switching profile cancels outstanding work.
+  Counts appear before metadata requests complete. No full metadata objects are
+  retained by this dashboard.
+
 ### Delivery status
 
-Source integration is prepared; the combined Android build and device tests have
-not yet run. Local checks passed the five APK-verifier fixture tests, shell syntax
-and diff-whitespace checks. Go, Kotlin and the Android toolchain are not installed
-in the editing environment, so these checks are not evidence of a passing build.
-The prior Enhanced-only test results below do not certify the combined app.
+The previous combined revision `e178e9f` passed signed build
+[35177402523](https://github.com/Magichouse227/NuvioTV/actions/runs/35177402523),
+including 302 selected Kotlin tests, and the user confirmed that build runs smoothly.
+That result does not certify the new 1.0.0/interface update.
+
+The current source passes five APK-verifier fixture tests, XML resource parsing,
+shell syntax and diff-whitespace checks locally. Ten new statistics regression
+tests and the upstream playback/subtitle regressions are included in the signed
+build's required test selection. Kotlin, Gradle and the Android toolchain are not
+installed in the editing environment; the new APK and these JVM tests still need
+the GitHub build. Physical TV focus/layout and installation verification remain pending.
 
 Run **PR Full Debug Build** manually on **feature/native-nntp-testing**. After it
 passes, its existing signed-release step replaces `NuvioTV-NNTP-test.apk` on
@@ -128,8 +162,13 @@ test has been completed.
   uninstall the NNTP app or clear its data. Confirm profiles, addons, watch history
   and preferences remain. The old Enhanced-only preview has separate app storage;
   its settings are not automatically imported.
-- Use the remote to open and leave each new dialog. In Profile Insights, move
-  through enough recent-history and genre rows to scroll beyond the first page.
+- Use the remote to move across every top navigation item, enter content with
+  Down, return with Back/Up, switch profiles and enter/leave playback. Verify that
+  the menu does not overlap the hero or appear over video. Toggle the sidebar
+  fallback once and verify settings and navigation remain available.
+- In Profile Insights, move through both overview rows, the Taste DNA card and
+  recent history beyond the first page. Switch profiles and verify the name,
+  avatar and counts change together. Check an empty profile and unavailable metadata.
 - Add the user's own M3U, Xtream or Stalker source; check channel search,
   group/source filters, favorites, last watched and playback. Switch profiles
   and confirm that the provider configuration and favorites remain separate.

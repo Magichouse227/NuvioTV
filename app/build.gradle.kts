@@ -165,8 +165,8 @@ android {
         applicationId = "com.nuvio.tv"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1060
-        versionName = "0.9.2-beta"
+        versionCode = 1062
+        versionName = "1.0.0"
         buildConfigField(
             "String",
             "TEST_BUILD_SHA",
@@ -466,6 +466,13 @@ afterEvaluate {
             includeTestsMatching("com.nuvio.tv.core.performance.*")
             includeTestsMatching("com.nuvio.tv.core.tmdb.TmdbMetadataServiceTest")
             includeTestsMatching("com.nuvio.tv.ui.screens.detail.RandomEpisodePolicyTest")
+            includeTestsMatching("com.nuvio.tv.ui.screens.settings.ProfileInsightsDataTest")
+            includeTestsMatching("com.nuvio.tv.core.player.dvmkv.*")
+            includeTestsMatching("com.nuvio.tv.ui.screens.player.MpvPositionFromMediaRequestTest")
+            includeTestsMatching("com.nuvio.tv.ui.screens.player.SubtitleCredentialScopeTest")
+            includeTestsMatching("com.nuvio.tv.ui.screens.player.SubtitleRoutingTest")
+            includeTestsMatching("com.nuvio.tv.data.remote.dto.mdblist.MDBListMediaResponseDtoTest")
+            includeTestsMatching("com.nuvio.tv.domain.model.ScraperInfoTest")
             includeTestsMatching("com.nuvio.tv.data.mapper.StreamNzbMapperTest")
             includeTestsMatching("com.nuvio.tv.ui.screens.player.PlayerRuntimeErrorRecoveryPolicyTest")
         }
@@ -487,7 +494,7 @@ afterEvaluate {
                         "python3", "scripts/verify-test-apk.py",
                         "app/build/outputs/apk/full/debug/app-full-universal-debug.apk",
                         "--build-sha", providers.environmentVariable("GITHUB_SHA").get(),
-                        "--minimum-version", "1060",
+                        "--minimum-version", "1062",
                         "--native-dir",
                         "app/build/intermediates/stripped_native_libs/fullDebug/stripFullDebugDebugSymbols/out/lib",
                         "--aapt", tools.resolve("aapt").absolutePath,

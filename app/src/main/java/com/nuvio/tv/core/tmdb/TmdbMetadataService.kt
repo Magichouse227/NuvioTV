@@ -863,7 +863,7 @@ class TmdbMetadataService(
             )
 
             // Show in release order
-            val sortedParts = rawParts.sortedBy { it.releaseDate ?: "9999" }
+            val sortedParts = rawParts.sortedBy { it.releaseDate?.takeIf(String::isNotBlank) ?: "9999" }
 
             val includeImageLanguage = buildString {
                 append(normalizedLanguage.substringBefore("-"))
@@ -1899,3 +1899,4 @@ internal fun resolveDisplayLabel(
     // Otherwise fallback to whatever non-null exists
     return fallback ?: originalLabel ?: name
 }
+

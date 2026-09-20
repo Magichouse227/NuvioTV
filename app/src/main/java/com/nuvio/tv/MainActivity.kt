@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
@@ -138,6 +139,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Button
 import androidx.tv.material3.Text
+import androidx.tv.material3.contentColorFor
 import androidx.tv.material3.rememberDrawerState
 import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
@@ -151,6 +153,7 @@ import com.nuvio.tv.core.diagnostics.DiagnosticReportStore
 import com.nuvio.tv.core.diagnostics.DiagnosticShareController
 import com.nuvio.tv.core.diagnostics.DiagnosticShareLink
 import com.nuvio.tv.core.diagnostics.StoredDiagnosticReport
+import com.nuvio.tv.core.player.PlayerWindowBackdrop
 import com.nuvio.tv.core.profile.ProfileManager
 import com.nuvio.tv.core.sync.ProfileSyncService
 import com.nuvio.tv.core.sync.StartupSyncService
@@ -258,6 +261,7 @@ private data class MainUiPrefs(
     val experienceModeLoaded: Boolean = false,
     val addonSetupSkipped: Boolean = false,
     val sidebarCollapsed: Boolean = false,
+    val topNavigationEnabled: Boolean = true,
     val modernSidebarEnabled: Boolean = false,
     val modernSidebarBlurPref: Boolean = false,
     val discoverLocation: DiscoverLocation? = null,
@@ -382,7 +386,7 @@ open class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         StartupTimingMarkers.markActivityCreated()
         isFirstResumeAfterCreate = true
-        window?.setBackgroundDrawable(null)
+        window?.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
 
         // Wire the Activity-level launcher to the tracker
         externalPlaybackTracker.activityLauncher = externalPlayerLauncher
@@ -633,9 +637,11 @@ open class MainActivity : ComponentActivity() {
                     themeAndExperienceFlow,
                     layoutAndFeaturesFlow,
                     extraFeaturesFlow,
-                    layoutPreferenceDataStore.cardDepthStyle
-                ) { themePrefs, layoutPrefs, extraPrefs, cardDepthStyle ->
+                    layoutPreferenceDataStore.cardDepthStyle,
+                    layoutPreferenceDataStore.topNavigationEnabled
+                ) { themePrefs, layoutPrefs, extraPrefs, cardDepthStyle, topNavigationEnabled ->
                     themePrefs.copy(
+                        topNavigationEnabled = topNavigationEnabled,
                         hasChosenLayout = layoutPrefs.hasChosenLayout,
                         sidebarCollapsed = layoutPrefs.sidebarCollapsed,
                         modernSidebarEnabled = layoutPrefs.modernSidebarEnabled,
@@ -770,11 +776,17 @@ open class MainActivity : ComponentActivity() {
                     LocalStartupLoadingState provides startupLoadingState,
                     LocalStartupSplashEnabled provides startupSplashEnabled
                 ) {
+                val transparentPlayerBackdrop = PlayerWindowBackdrop.isTransparentRequested
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     shape = RectangleShape,
                     colors = SurfaceDefaults.colors(
-                        containerColor = NuvioTheme.colors.Background
+                        containerColor = if (transparentPlayerBackdrop) {
+                            Color.Transparent
+                        } else {
+                            NuvioTheme.colors.Background
+                        },
+                        contentColor = contentColorFor(NuvioTheme.colors.Background)
                     )
                 ) {
                     // Wrap everything in a Box. This prevents any black flash between
@@ -1203,7 +1215,24 @@ open class MainActivity : ComponentActivity() {
                             hasSelectedProfileThisSession = false
                         }
                         Box(modifier = Modifier.fillMaxSize()) {
-                            if (modernSidebarEnabled) {
+                            if (mainUiPrefs.topNavigationEnabled) {
+                                TopNavigationScaffold(
+                                    longPressBackHeld = longPressBackHeld,
+                                    navController = navController,
+                                    startDestination = startDestination,
+                                    currentRoute = currentRoute,
+                                    rootRoutes = rootRoutes,
+                                    drawerItems = drawerItems,
+                                    selectedDrawerRoute = selectedDrawerRoute,
+                                    activeProfileName = activeProfile?.name ?: "",
+                                    activeProfileColorHex = activeProfile?.avatarColorHex ?: "#1E88E5",
+                                    activeProfileAvatarImageUrl = activeProfileAvatarImageUrl,
+                                    showProfileSelector = profiles.size > 1,
+                                    onSwitchProfile = handleSwitchProfile,
+                                    onNavigate = { optimisticRoute = it },
+                                    onExitApp = handleExitApp
+                                )
+                            } else if (modernSidebarEnabled) {
                                 ModernSidebarScaffold(
                                     longPressBackHeld = longPressBackHeld,
                                     navController = navController,
@@ -2413,7 +2442,7 @@ private fun CollapsedSidebarPill(
     }
 }
 
-private fun navigateToDrawerRoute(
+internal fun navigateToDrawerRoute(
     navController: NavHostController,
     currentRoute: String?,
     targetRoute: String
@@ -2455,7 +2484,7 @@ private fun isBlockedContentKey(key: Key): Boolean {
 }
 
 @Composable
-private fun DrawerItemIcon(
+internal fun DrawerItemIcon(
     iconRes: Int?,
     icon: ImageVector?,
     modifier: Modifier = Modifier,
@@ -2558,4 +2587,3 @@ object LocaleCache {
     @Volatile
     var localeTag: String = UNSET
 }
-

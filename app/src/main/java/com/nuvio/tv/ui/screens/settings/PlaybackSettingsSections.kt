@@ -457,6 +457,21 @@ internal fun PlaybackSettingsSections(
                         enabled = !generalUi.isExternalPlayer && playerSettings.skipIntroEnabled
                     )
                 }
+
+                item(key = "general_auto_skip_movie_credits") {
+                    ToggleSettingsItem(
+                        icon = Icons.Default.SkipNext,
+                        title = stringResource(R.string.auto_skip_movie_credits),
+                        subtitle = stringResource(R.string.auto_skip_movie_credits_sub),
+                        isChecked = AutoSkipSegmentType.MOVIE_CREDITS in playerSettings.autoSkipSegmentTypes,
+                        onCheckedChange = {
+                            onSetAutoSkipSegmentTypeEnabled(AutoSkipSegmentType.MOVIE_CREDITS, it)
+                        },
+                        onFocused = { focusedSection = PlaybackSection.GENERAL },
+                        enabled = !generalUi.isExternalPlayer && playerSettings.skipIntroEnabled
+                    )
+                }
+
             }
 
         }
@@ -1220,3 +1235,4 @@ private fun InternalPlayerEngineDialog(
         maxHeight = 320.dp
     )
 }
+
